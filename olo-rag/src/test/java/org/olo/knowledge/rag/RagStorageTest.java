@@ -114,6 +114,22 @@ class RagStorageTest {
     }
 
     @Test
+    void forcedReindexRepairsLostVectorsWithoutRevivingDeletedDocuments() throws Exception {
+        call(TENANT, "alice", "rag.ingest", document("restorable source", 0));
+        points.clear();
+        var request = Map.of("kbId", kb, "docId", doc, "type", "reindex", "force", true);
+        var repaired = json(call(TENANT, "alice", "rag.update", request));
+        assertEquals(2, repaired.path("version").asLong());
+        assertFalse(points.isEmpty());
+        assertFalse(
+                json(call(TENANT, "alice", "rag.query", Map.of("kbId", kb, "query", "source")))
+                        .path("chunks")
+                        .isEmpty());
+        call(TENANT, "alice", "rag.delete", Map.of("kbId", kb, "docId", doc));
+        assertThrows(SecurityException.class, () -> call(TENANT, "alice", "rag.update", request));
+    }
+
+    @Test
     void unauthorizedValidIdsAndOtherTenantAreRefused() throws Exception {
         call(TENANT, "alice", "rag.ingest", document("secret", 0));
         assertThrows(

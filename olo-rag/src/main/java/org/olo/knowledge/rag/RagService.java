@@ -142,7 +142,8 @@ public final class RagService {
                             doc);
             if (source.isEmpty()) throw Scope.denied();
             var current = source.getFirst();
-            if (embeddings.version().equals(current.get("model")))
+            if (embeddings.version().equals(current.get("model"))
+                    && !b.path("force").asBoolean(false))
                 return Map.of(
                         "docId",
                         doc,

@@ -95,3 +95,57 @@ and an explicitly simulated authenticated Control server. Control's own bridge/T
 These component checks do not replace one real ToolGate → broker → mTLS listener → database
 application test, Kubernetes network-denial test, Temporal worker/backend deployment test, RAG target evaluation,
 or operational recovery drills. Record actual evidence before counting those M6/M7 acceptance gates complete.
+
+## Repeatable local staging qualification
+
+On Windows with Docker Desktop (Linux containers), Java 21, Python 3.11+ with `cryptography`, kubectl,
+and network access to the pinned official images:
+
+```powershell
+.\qualification.ps1 start
+.\qualification.ps1 status
+.\qualification.ps1 test -Python C:\path\to\python.exe
+.\qualification.ps1 test -Python C:\path\to\python.exe -Evaluation
+.\qualification.ps1 stop
+```
+
+`start` creates a dedicated two-node `olo-qualification` kind cluster with Calico. It verifies the official kind
+binary checksum, pins the Kubernetes node image by digest, and isolates its kubeconfig under ignored
+`build/qualification/runtime/`. It caps the control-plane at 2 CPUs/3 GiB and the worker at 4 CPUs/8 GiB.
+An existing cluster without this workspace's ownership record is refused. It never selects the user's current Kubernetes context.
+
+`test` verifies the committed NetworkPolicies with 22 real positive/negative TCP probes. Probe servers only
+qualify CNI isolation; application mTLS and authorization have their own tests. `-Evaluation` additionally runs
+the 200-document, 150-question authorized corpus against disposable real PostgreSQL/Qdrant/Ollama instances.
+The versioned labelled fixture is `fixtures/rag-evaluation-v1.json`. Component latency is reported explicitly
+and must not be represented as Gateway latency or a staging load-test result.
+
+`test -FullStack` runs the separate current-source Control/Gateway/Tool Host/application qualification fixture.
+Build the service distributions and both packages using the commands above first. Build its dedicated, owner-labelled ToolGate images with:
+
+```powershell
+python tools/build_qualification.py
+# Or build while starting a new staging session:
+.\qualification.ps1 start -BuildImages -Python C:\path\to\python.exe
+```
+
+The helper builds the sibling current-source ToolGate repository and labels both images for `stop` cleanup;
+it refuses to overwrite unowned image tags. The full-chain fixture provisions
+its own exact root grants, tenant-bound users and enrolled hosts, and uses separate application containers and
+PostgreSQL databases. It uses an explicitly trusted test user-credential issuer; RFC 8693 token exchange and
+Temporal pipeline recovery are separate gates. Its Gateway/Control loopback hop is a development fixture,
+not an assertion of encrypted transport throughout a production deployment. Full authorization/ingest qualification is still in progress; startup and user ingress have passed.
+
+**Cleanup:** `stop` interrupts recorded fixture processes and removes this workspace's test containers,
+volumes, networks, probe images, the kind cluster, a newly downloaded session-owned node image, and private
+runtime files (generated credentials, keys and kubeconfig). Sanitized reports and source code remain.
+Existing images, services and clusters are not removed. If cleanup fails, the ownership record remains so
+`stop` can be retried. Reports are under `build/qualification/`; they are intentionally outside Git.
+
+The October 24 component evaluation measured recall@5 1.00, precision@5 0.733, zero leakage and 750 correct
+citations. Its p95 component query latency was 2213 ms, above the accepted latency target. These results do
+not close M8.2a or the M10 50-user/50,000-document load gate.
+
+For restoring a lost vector index from the retained SQL source, governed `rag.update` accepts
+`{type:"reindex",docId:"<uuid>",force:true}`. This publishes a new version even for the same embedding artifact;
+normal scheduled reindex remains a no-op when the artifact is unchanged. A tombstone still refuses rebuilding.
