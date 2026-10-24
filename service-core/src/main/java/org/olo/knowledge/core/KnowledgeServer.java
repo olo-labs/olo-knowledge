@@ -143,6 +143,19 @@ public final class KnowledgeServer {
                     } catch (Database.CommitUncertain uncertain) {
                         safeReply(exchange, 503, "OUTCOME_UNKNOWN: reconcile the storage receipt");
                     } catch (SecurityException denied) {
+                        var origin = denied.getStackTrace();
+                        String source =
+                                origin.length == 0
+                                        ? "unknown"
+                                        : origin[0].getClassName()
+                                                + "#"
+                                                + origin[0].getMethodName();
+                        // Code locations only: never exception messages, request bodies, permits or
+                        // credentials.
+                        System.getLogger(KnowledgeServer.class.getName())
+                                .log(
+                                        System.Logger.Level.WARNING,
+                                        "authorization_denied source=" + source);
                         safeReply(exchange, 403, "Access denied");
                     } catch (IllegalArgumentException invalid) {
                         safeReply(exchange, 400, "Invalid request");

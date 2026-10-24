@@ -132,9 +132,11 @@ python tools/build_qualification.py
 The helper builds the sibling current-source ToolGate repository and labels both images for `stop` cleanup;
 it refuses to overwrite unowned image tags. The full-chain fixture provisions
 its own exact root grants, tenant-bound users and enrolled hosts, and uses separate application containers and
-PostgreSQL databases. It uses an explicitly trusted test user-credential issuer; RFC 8693 token exchange and
-Temporal pipeline recovery are separate gates. Its Gateway/Control loopback hop is a development fixture,
-not an assertion of encrypted transport throughout a production deployment. Full authorization/ingest qualification is still in progress; startup and user ingress have passed.
+PostgreSQL databases. It exchanges fixture platform assertions at the actual Control RFC 8693 endpoint using
+a dedicated fixture issuer key; Temporal pipeline recovery remains a separate gate. Its Gateway/Control loopback hop is a development fixture,
+not an assertion of encrypted transport throughout a production deployment. Full authorization/ingest qualification
+is still in progress: startup, token exchange and user ingress passed, but the first downstream write returned
+`OUTCOME_UNKNOWN` after a service rejection. It remains fenced rather than being retried as a new write.
 
 **Cleanup:** `stop` interrupts recorded fixture processes and removes this workspace's test containers,
 volumes, networks, probe images, the kind cluster, a newly downloaded session-owned node image, and private

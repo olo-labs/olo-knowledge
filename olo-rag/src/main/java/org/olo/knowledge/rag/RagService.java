@@ -300,18 +300,27 @@ public final class RagService {
             return Map.of("valid", valid, "aclVersion", resource.get("acl_version"));
         }
         String question = Json.text(b, "query", 4096);
+        // Select visible versions in SQL; do not issue one ACL round-trip per document.
         var docs =
                 rows(
                         c,
-                        "SELECT doc_id,version FROM rag_document WHERE tenant=? AND kb_id=?::uuid"
-                                + " AND NOT deleted AND model=?",
+                        "SELECT d.doc_id,d.version FROM rag_document d JOIN knowledge_resource r ON"
+                            + " r.tenant=d.tenant AND r.id=d.kb_id WHERE d.tenant=? AND"
+                            + " d.kb_id=?::uuid AND NOT d.deleted AND NOT r.deleted AND d.model=?"
+                            + " AND (d.owner_id=? OR r.owner_id=? OR EXISTS (SELECT 1 FROM"
+                            + " rag_document_member m WHERE m.tenant=d.tenant AND m.kb_id=d.kb_id"
+                            + " AND m.doc_id=d.doc_id AND m.subject=?) OR (NOT d.acl_restricted AND"
+                            + " EXISTS (SELECT 1 FROM knowledge_member m WHERE m.tenant=d.tenant"
+                            + " AND m.resource_id=d.kb_id AND m.subject=?)))",
                         s.tenant(),
                         kb,
-                        embeddings.version());
+                        embeddings.version(),
+                        s.subject(),
+                        s.subject(),
+                        s.subject(),
+                        s.subject());
         var versions = new ArrayList<String>();
-        for (var d : docs)
-            if (documentAllowed(c, s, kb, d.get("doc_id").toString(), false))
-                versions.add(d.get("doc_id") + ":" + d.get("version"));
+        for (var d : docs) versions.add(d.get("doc_id") + ":" + d.get("version"));
         var found =
                 index.query(
                         s.tenant(),
@@ -450,7 +459,8 @@ public final class RagService {
                 rows(
                         c,
                         "SELECT * FROM knowledge_resource WHERE tenant=? AND id=?::uuid AND NOT"
-                                + " deleted FOR UPDATE",
+                                + " deleted "
+                                + (s.operation().equals("rag.query") ? "FOR SHARE" : "FOR UPDATE"),
                         s.tenant(),
                         kb);
         if (root.isEmpty()) throw Scope.denied();

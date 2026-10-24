@@ -1,6 +1,6 @@
 """Owned fresh real-Control/Gateway/Tool Host fixture. Never attaches to an existing installation."""
 import base64, contextlib, datetime, hashlib, importlib.util, json, os, pathlib, secrets, ssl
-import subprocess, sys, tempfile, time, urllib.error, urllib.request, uuid
+import re, subprocess, sys, tempfile, time, urllib.error, urllib.request, urllib.parse, uuid
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -10,17 +10,18 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 TOOLGATE = ROOT.parent / 'olo-toolgate'
 
 def run(args, **kwargs):
+    if kwargs.get('text'):kwargs.setdefault('encoding','utf-8')
     return subprocess.run(args, check=True, capture_output=True, **kwargs)
 
 def docker(*args):
     return run(['docker', *map(str,args)], text=True).stdout.strip()
 
-def http(url, token=None, body=None, method='GET', headers=None):
+def http(url, token=None, body=None, method='GET', headers=None, context=None):
     supplied={'Content-Type':'application/json', **(headers or {})}
     if token: supplied['Authorization']='Bearer '+token
     data=body if isinstance(body,bytes) else json.dumps(body).encode() if body is not None else None
     try:
-        with urllib.request.urlopen(urllib.request.Request(url,data,supplied,method=method),timeout=30) as response:
+        with urllib.request.urlopen(urllib.request.Request(url,data,supplied,method=method),timeout=30,context=context) as response:
             raw=response.read(); return response.status,json.loads(raw) if raw else None
     except urllib.error.HTTPError as response:
         raw=response.read(); return response.code,json.loads(raw) if raw else None
@@ -35,12 +36,18 @@ class Stack:
         self.process_file=runtime/('fixture-process-'+str(os.getpid())+'.json')
         self.process_file.write_text(json.dumps({'workspace':str(ROOT),'pid':os.getpid(),'session':self.name,'script':'qualification_stack.py'}),encoding='utf-8')
     def close(self):
+        def sanitized(value):
+            return re.sub(r'eyJ[A-Za-z0-9_.-]{40,}', '[redacted credential]', value.replace(self.password,'[redacted]'))
         if hasattr(self,'control'):
             output=ROOT/'build/qualification';output.mkdir(parents=True,exist_ok=True)
-            log=subprocess.run(['docker','logs',self.control],capture_output=True,text=True)
-            (output/'control-fixture.log').write_text(log.stdout+log.stderr,encoding='utf-8')
-            gateway=subprocess.run(['docker','exec',self.control,'cat','/data/run/qualification-gateway.log'],capture_output=True,text=True)
-            (output/'gateway-fixture.log').write_text(gateway.stdout,encoding='utf-8')
+            log=subprocess.run(['docker','logs',self.control],capture_output=True,text=True,encoding='utf-8')
+            (output/'control-fixture.log').write_text(sanitized(log.stdout+log.stderr),encoding='utf-8')
+            gateway=subprocess.run(['docker','exec',self.control,'cat','/data/run/qualification-gateway.log'],capture_output=True,text=True,encoding='utf-8')
+            (output/'gateway-fixture.log').write_text(sanitized(gateway.stdout),encoding='utf-8')
+        for number,container in enumerate(self.containers):
+            log=subprocess.run(['docker','logs','--tail','200',container],capture_output=True,text=True,encoding='utf-8')
+            safe=sanitized(log.stdout+log.stderr)
+            (ROOT/'build/qualification'/('fixture-component-'+str(number)+'.log')).write_text(safe,encoding='utf-8')
         for container in reversed(self.containers): subprocess.run(['docker','rm','-f',container],capture_output=True)
         subprocess.run(['docker','volume','rm',self.volume,self.trust_volume],capture_output=True)
         subprocess.run(['docker','network','rm',self.network],capture_output=True)
@@ -51,6 +58,17 @@ class Stack:
     def start(self):
         docker('network','create','--label','io.olo.qualification.owner=olo-knowledge',self.network);docker('volume','create','--label','io.olo.qualification.owner=olo-knowledge',self.volume);docker('volume','create','--label','io.olo.qualification.owner=olo-knowledge',self.trust_volume)
         trust=self.path/'trust';trust.mkdir()
+        self.binding='binding-knowledge'
+        self.credential_key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+        self.assertion_key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+        (trust/'credential.key').write_bytes(self.credential_key.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()))
+        (trust/'assertion-public.pem').write_bytes(self.assertion_key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo))
+        config={'TOOLGATE_CONTROL_USER_CREDENTIAL_ENABLED':'true','TOOLGATE_CONTROL_USER_CREDENTIAL_ISSUER':'olo-qualification',
+            'TOOLGATE_CONTROL_USER_CREDENTIAL_PRIVATE_KEY_PATH':'/trust/credential.key','TOOLGATE_CONTROL_USER_CREDENTIAL_KEY_ID':'qualification-user',
+            'TOOLGATE_CONTROL_USER_CREDENTIAL_BINDING_ID':self.binding,'TOOLGATE_CONTROL_USER_CREDENTIAL_SUBJECT_ISSUER':'https://quickstart.local',
+            'TOOLGATE_CONTROL_USER_CREDENTIAL_SUBJECT_AUDIENCE':'toolgate-user-exchange','TOOLGATE_CONTROL_USER_CREDENTIAL_SUBJECT_KEY_ID':'qualification-backend',
+            'TOOLGATE_CONTROL_USER_CREDENTIAL_SUBJECT_PUBLIC_KEY_PATH':'/trust/assertion-public.pem'}
+        environment=self.path/'control.env';environment.write_text('\n'.join(k+'='+v for k,v in config.items())+'\n',encoding='utf-8')
         now=datetime.datetime.now(datetime.timezone.utc)
         self.ca_key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
         subject=x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME,'Owned OLO qualification TLS root')])
@@ -68,11 +86,13 @@ class Stack:
             "import os,shutil,pathlib;p=pathlib.Path('/trust');shutil.copytree('/seed',p,dirs_exist_ok=True);os.chown(p,65532,65532);p.chmod(0o700);[(os.chown(f,65532,65532),f.chmod(0o600)) for f in p.iterdir()]")
         self.control=docker('run','--label','io.olo.qualification.owner=olo-knowledge','-d','--name',self.name,'--network',self.network,'--network-alias','control',
             '-p','127.0.0.1::8080','-p','127.0.0.1::8443','-p','127.0.0.1::8084',
-            '-e','TOOLGATE_ALLOW_LOOPBACK_MCP_HTTP=true','-v',self.volume+':/data',
+            '-e','TOOLGATE_ALLOW_LOOPBACK_MCP_HTTP=true','--env-file',environment,'-v',self.volume+':/data',
             '-v',self.trust_volume+':/trust',self.image)
         self.containers.append(self.control)
         info=json.loads(docker('inspect',self.control))[0]
         self.origin='http://127.0.0.1:'+info['NetworkSettings']['Ports']['8080/tcp'][0]['HostPort']
+        self.control_origin='https://127.0.0.1:'+info['NetworkSettings']['Ports']['8443/tcp'][0]['HostPort']
+        self.control_ssl=ssl.create_default_context(cafile=str(self.path/'trust/device-ca.crt'))
         self.gateway='http://127.0.0.1:'+info['NetworkSettings']['Ports']['8084/tcp'][0]['HostPort']
         self.wait(lambda:http(self.origin+'/health/ready')[0]==200,'Control readiness',180)
         for user in ['admin','reviewer-1','reviewer-2']:
@@ -82,6 +102,8 @@ class Stack:
             self.require(status==200,'Fixture login refused')
             self.tokens[user]=result['accessToken']
         self.snapshot=self.api('/config/export');self.tenant=self.snapshot['tenantId']
+        self.cached_credentials={}
+        self.exchange_token=self.script("import sys;sys.path.insert(0,'/opt/quickstart');import supervisor as s;print(s.jwt(['toolgate-olo-token-exchange'],'olo-backend',directory_bound=False))")
         for host in ['tool-host-local','tool-host-remote']:
             def pending():return next((v for v in self.api('/endpoint/enrollments')['items'] if v['deviceId']==host),None)
             enrollment=self.wait(pending,'Tool Host enrollment',60)
@@ -113,13 +135,13 @@ class Stack:
                 value=probe()
                 if value:return value
             except (OSError,urllib.error.URLError,KeyError):pass
-            time.sleep(.3)
+            time.sleep(2)
         raise TimeoutError(label+' deadline exceeded')
     def api(self,path,body=None,method='GET',user='admin',revision=None):
         headers={'Idempotency-Key':str(uuid.uuid4())}
         if revision is not None:headers['If-Match']='"'+str(revision)+'"'
         status,value=http(self.origin+'/api/control/v1'+path,self.tokens[user],body,method,headers)
-        if status==503:raise ConnectionError('Control temporarily unavailable: '+path)
+        if status in (429,503):raise ConnectionError('Control temporarily unavailable: '+path)
         self.require(status in (200,201,202,204),'Control request failed: '+path+' HTTP '+str(status))
         if status==202:
             maker=user;reviewer='reviewer-2' if user=='admin' else 'admin'
@@ -127,7 +149,6 @@ class Stack:
                 value=self.api('/configuration-changes/'+value['id']+'/transition',{'action':action,'expectedRevision':value['revision']},'POST',actor)
         return value
     def configure_gateway(self):
-        self.credential_key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
         public=self.path/'users.pem';public.write_bytes(self.credential_key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo))
         docker('cp',public,self.control+':/data/run/qualification-users.pem')
         self.binding='binding-knowledge'
@@ -147,6 +168,18 @@ Path('/data/run/qualification-gateway.json').write_text(json.dumps(v))
             return status==200
         self.wait(ready,'User Gateway readiness')
     def credential(self,user,tenant=None,epoch=None):
+        if tenant is None and epoch is None:
+            previous=self.cached_credentials.get(user)
+            if previous and time.time()-previous[0]<180:return previous[1]
+            now=int(time.time())
+            def encode(v):return base64.urlsafe_b64encode(json.dumps(v,separators=(',',':')).encode()).rstrip(b'=')
+            unsigned=encode({'alg':'RS256','typ':'olo-session-assertion+jwt','kid':'qualification-backend'})+b'.'+encode({'iss':'https://quickstart.local','aud':'toolgate-user-exchange','sub':user,'iat':now,'exp':now+300})
+            assertion=(unsigned+b'.'+base64.urlsafe_b64encode(self.assertion_key.sign(unsigned,padding.PKCS1v15(),hashes.SHA256())).rstrip(b'=')).decode()
+            form=urllib.parse.urlencode({'grant_type':'urn:ietf:params:oauth:grant-type:token-exchange','subject_token_type':'urn:ietf:params:oauth:token-type:jwt','subject_token':assertion,'audience':'toolgate-gateway'}).encode()
+            status,result=http(self.control_origin+'/api/control/v1/oauth/token-exchange',self.exchange_token,form,'POST',{'Content-Type':'application/x-www-form-urlencoded'},context=self.control_ssl)
+            self.require(status==200,'Real Control user token exchange refused HTTP '+str(status))
+            self.cached_credentials[user]=(time.time(),result['access_token'])
+            return result['access_token']
         identity=next(v for v in self.snapshot['identityBindings'] if v['subject']==user)
         now=int(time.time());claims={'iss':'olo-qualification','aud':'toolgate-gateway','sub':identity['userId'],'tid':tenant or self.tenant,'sep':epoch or identity['sessionEpoch'],'bid':self.binding,'iat':now,'exp':now+300,'jti':str(uuid.uuid4())}
         def encode(v):return base64.urlsafe_b64encode(json.dumps(v,separators=(',',':')).encode()).rstrip(b'=')
@@ -307,7 +340,7 @@ print(tag['digest'])
         self.require(timings['grantRevocationSeconds']<=30,'Grant revocation exceeds 30 seconds')
         mark('live Control grant revocation blocks result retrieval within 30 seconds')
         report={'passed':True,'gates':gates,'timings':timings,'scope':'Owned current-source Quickstart plus separate memory/RAG JVM containers and databases. Gateway-Control loopback HTTP fixture; no CNI, staging load or complete Temporal pipeline claim.',
-            'fixtureUserCredentialIssuer':True,'note':'Dedicated trusted test issuer signs Gateway user credentials. RFC 8693 exchange is separately covered by Control tests.'}
+            'userCredentialExchange':'Actual Control RFC 8693 endpoint, fixture platform assertions and dedicated production issuer key configuration'}
         output=ROOT/'build/qualification/real-stack.json';output.parent.mkdir(parents=True,exist_ok=True)
         output.write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
         return report
