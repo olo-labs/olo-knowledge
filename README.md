@@ -141,6 +141,9 @@ volumes, networks, probe images, the kind cluster, a newly downloaded session-ow
 runtime files (generated credentials, keys and kubeconfig). Sanitized reports and source code remain.
 Existing images, services and clusters are not removed. If cleanup fails, the ownership record remains so
 `stop` can be retried. Reports are under `build/qualification/`; they are intentionally outside Git.
+Docker inventory errors fail cleanup explicitly; success requires a final check that no labelled test
+containers, volumes, networks or images remain. Running `stop` again is safe. Downloaded build tools and
+shared dependency/model caches remain available for subsequent test runs; they are not running services.
 
 The October 24 component evaluation measured recall@5 1.00, precision@5 0.733, zero leakage and 750 correct
 citations. Its p95 component query latency was 2213 ms, above the accepted latency target. These results do

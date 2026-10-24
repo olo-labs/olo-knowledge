@@ -34,6 +34,11 @@ function Get-DockerJson([string[]]$Arguments) {
     if($LASTEXITCODE -ne 0){throw 'Docker inspection failed'}
     return ($value | ConvertFrom-Json)
 }
+function Get-DockerLines([string[]]$Arguments) {
+    $lines=@(& docker @Arguments)
+    if($LASTEXITCODE -ne 0){throw 'Docker resource inventory failed; retaining ownership records for cleanup retry'}
+    return $lines
+}
 function Get-Session {
     if(!(Test-Path -LiteralPath $StateFile)){throw 'No owned staging session. Run start first.'}
     $session=Get-Content -Raw -LiteralPath $StateFile | ConvertFrom-Json
@@ -61,28 +66,34 @@ function Stop-FixtureProcess {
 }
 function Stop-FixtureResources {
     Stop-FixtureProcess
-    $containers=@(& docker ps -aq --no-trunc --filter 'label=io.olo.qualification.owner=olo-knowledge')
+    $containers=@(Get-DockerLines @('ps','-aq','--no-trunc','--filter','label=io.olo.qualification.owner=olo-knowledge'))
     foreach($container in $containers){Invoke-Checked 'docker' @('rm','-f','-v',$container)}
     foreach($kind in @('volume','network')) {
-        $resources=@(& docker $kind ls -q --filter 'label=io.olo.qualification.owner=olo-knowledge')
+        $resources=@(Get-DockerLines @($kind,'ls','-q','--filter','label=io.olo.qualification.owner=olo-knowledge'))
         foreach($resource in $resources){Invoke-Checked 'docker' @($kind,'rm',$resource)}
     }
-    $images=@(& docker image ls -q --filter 'label=io.olo.qualification.owner=olo-knowledge' | Select-Object -Unique)
+    $images=@(Get-DockerLines @('image','ls','-q','--filter','label=io.olo.qualification.owner=olo-knowledge') | Select-Object -Unique)
     foreach($image in $images){Invoke-Checked 'docker' @('image','rm',$image)}
+    foreach($resourceType in @('container','volume','network','image')) {
+        $listArguments=@($resourceType,'ls','-q','--filter','label=io.olo.qualification.owner=olo-knowledge')
+        if($resourceType -eq 'container'){$listArguments+= '--all'}
+        $remaining=@(Get-DockerLines $listArguments)
+        if($remaining.Count -gt 0){throw "Owned $resourceType cleanup incomplete; retaining ownership records for retry"}
+    }
 }
 function Stop-Session {
     $session=Get-Session
     Stop-FixtureResources
     # Verify exact node IDs before kind deletes by cluster name. Foreign resources are never adopted.
-    $nodes=@(& docker ps -aq --no-trunc --filter "label=io.x-k8s.kind.cluster=$Cluster")
+    $nodes=@(Get-DockerLines @('ps','-aq','--no-trunc','--filter',"label=io.x-k8s.kind.cluster=$Cluster"))
     foreach($node in $nodes) {
         if($node -and $node -notin $session.nodeIds){throw 'Unexpected cluster node; retaining ownership record for inspection'}
     }
     if($nodes.Count -gt 0){Invoke-Checked $Kind @('delete','cluster','--name',$Cluster,'--kubeconfig',$Kubeconfig)}
-    $remaining=@(& docker ps -aq --no-trunc --filter "label=io.x-k8s.kind.cluster=$Cluster")
+    $remaining=@(Get-DockerLines @('ps','-aq','--no-trunc','--filter',"label=io.x-k8s.kind.cluster=$Cluster"))
     if($remaining.Count -gt 0){throw 'Cluster cleanup incomplete; retaining session for retry'}
     if(!$session.networkExisted) {
-        $networks=@(& docker network ls -q --filter 'name=^kind$')
+        $networks=@(Get-DockerLines @('network','ls','-q','--filter','name=^kind$'))
         foreach($network in $networks) {
             $details=@(Get-DockerJson @('network','inspect',$network))[0]
             if(@($details.Containers.PSObject.Properties).Count -ne 0){throw 'Kind network still has users; preserving it and session record'}
@@ -93,7 +104,7 @@ function Stop-Session {
         $imageJson=& docker image inspect $NodeImage 2>$null
         if($LASTEXITCODE -eq 0) {
             $image=($imageJson | ConvertFrom-Json)[0]
-            $users=@(& docker ps -aq --filter "ancestor=$($image.Id)")
+            $users=@(Get-DockerLines @('ps','-aq','--filter',"ancestor=$($image.Id)"))
             if($users.Count -gt 0){throw 'The new node image acquired another user; preserving ownership evidence'}
             foreach($reference in @($NodeImage,($NodeImage -split '@')[0])) {
                 & docker image inspect $reference *> $null
@@ -102,7 +113,7 @@ function Stop-Session {
         }
     }
     Remove-PrivateRuntime
-    Write-Host 'Staging cluster, owned containers/volumes/networks, session-owned node image and private kubeconfig removed. Sanitized reports retained.'
+    Write-Host 'Staging cluster, owned containers/volumes/networks/images, session-owned node image and private credentials/kubeconfig removed. Sanitized reports retained.'
 }
 if($Action -eq 'stop') {
     if(!(Test-Path -LiteralPath $StateFile)){Stop-FixtureResources;if(Test-Path -LiteralPath $Runtime){Remove-PrivateRuntime};Write-Host 'No owned staging session remains.';exit 0}
