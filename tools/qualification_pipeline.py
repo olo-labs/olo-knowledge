@@ -9,6 +9,7 @@ import subprocess
 import time
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -241,6 +242,26 @@ class Pipeline(Stack):
         return json.loads(docker('exec',self.temporal,'temporal','workflow','describe',
             '--workflow-id','run-'+self.tenant+'~'+turn,'--output','json'))['workflowExecutionInfo']
 
+    def concurrent_turns(self,root):
+        def submit(_):
+            status,value=self.api_call(root+'/turns',{'message':'Concurrent qualification request.'},'POST')
+            self.require(status==202 and 'runId' in value,'Concurrent turn admission failed HTTP '+str(status))
+            return value['runId']
+        before=self.model_calls()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            turns=list(pool.map(submit,range(2)))
+        self.require(len(set(turns))==2,'Distinct requests shared a turn identity')
+        for turn in turns:
+            history=self.turn_history(root,turn)
+            self.require(sorted(v['role'] for v in history['messages'])==['assistant','user'],
+                         'Concurrent turn did not retain exactly one accepted message and one response')
+        status,history=self.api_call(root+'/messages')
+        self.require(status==200 and len(history.get('messages',[]))==6,
+                     'Concurrent turns created duplicate or missing conversation records')
+        ids=[v['message_id'] for v in history['messages']]
+        self.require(len(set(ids))==6 and self.model_calls()==before+2,'Concurrent turns duplicated a message or model call')
+        print('PASS two concurrent distinct backend turns retain unique messages and one model call per turn',flush=True)
+
     def terminal(self,turn):
         def closed():
             status=self.execution(turn)['status']
@@ -309,6 +330,7 @@ class Pipeline(Stack):
         raw=docker('exec',self.temporal,'temporal','workflow','show','--workflow-id','run-'+self.tenant+'~'+turn,'--output','json')
         self.require(protected_history(raw,self.canary),'Temporal payload protection failed (including decoded payload inspection)')
         self.recovered_replay(root,key,turn)
+        self.concurrent_turns(root)
         revocation=self.derived_revocation(root)
         for container in (self.backend,self.worker):
             logs=run(['docker','logs',container],text=True)
@@ -321,6 +343,7 @@ class Pipeline(Stack):
             scope='Real backend/worker/Temporal; scripted IdP and model. Development gRPC and Gateway-Control HTTP; no M10 transport/load signoff.',
             turnId=turn,tenant=self.tenant,historyEncrypted=True,completedTurnRestartReplay=True,
             agentChangePreservesUserAuthority=True,
+            concurrentDistinctTurns=True,
             revocation=revocation,images=images,
             knowledgeRevision=run(['git','rev-parse','HEAD'],cwd=ROOT,text=True).stdout.strip(),
             knowledgeWorktreeDirty=bool(run(['git','status','--porcelain'],cwd=ROOT,text=True).stdout.strip())),indent=2)+'\n')
