@@ -178,9 +178,20 @@ class Incident(Pipeline):
         self.require(status==200 and response.get('result',{}).get('cancelled') is True,'Original operation cancellation failed')
         status,response=invoke(operation,arguments)
         ended=response.get('result',{}).get('structuredContent',{})
-        self.require(status==200 and ended.get('invocationId')==approval['invocationId'] and ended.get('state')=='CANCELLED',
-                     'Cancelled original operation resumed execution')
-        evidence['cancellation']=dict(invocationId=approval['invocationId'],state='CANCELLED')
+        retained=self.api('/access/invocations/'+approval['invocationId'])
+        code=response.get('code') or response.get('error',{}).get('data',{}).get('code')
+        terminal=status==200 and ended.get('invocationId')==approval['invocationId'] and ended.get('state')=='CANCELLED'
+        # Control's durable cancel marker intentionally rejects submission before placement.
+        rejected=status==409 and code=='CONFLICT'
+        self.artifact('incident-cancellation-replay.json',json.dumps(dict(status=status,response=response,
+            invocationId=retained['id'],state=retained['state'],completedResources=retained['completedResources'],
+            permitReserved=retained.get('reservedNonce') is not None),indent=2)+'\n')
+        self.require((terminal or rejected) and retained['id']==approval['invocationId']
+                     and retained['state']=='CANCELLED' and not retained['completedResources']
+                     and retained.get('reservedNonce') is None,
+                     'Cancellation replay did not preserve the original cancelled invocation without dispatch')
+        evidence['cancellation']=dict(invocationId=approval['invocationId'],state='CANCELLED',replayStatus=status,
+                                     dispatched=False)
         operation,arguments,approval=pending('revoked-user')
         grant=self.api('/grants/incident-human')
         self.api('/grants/incident-human',{**grant,'enabled':False},'PUT',revision=grant['revision'])
