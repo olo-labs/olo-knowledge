@@ -52,6 +52,14 @@ class Stack:
     def close(self):
         def sanitized(value):
             return re.sub(r'eyJ[A-Za-z0-9_.-]{40,}', '[redacted credential]', value.replace(self.password,'[redacted]'))
+        if self.containers:
+            inspected=subprocess.run(['docker','inspect',*self.containers],capture_output=True,text=True,encoding='utf-8')
+            try:
+                resources=[dict(container=value['Id'],volumes=[mount['Name'] for mount in value.get('Mounts',[]) if mount['Type']=='volume'])
+                           for value in json.loads(inspected.stdout or '[]')
+                           if (value['Config'].get('Labels') or {}).get('io.olo.qualification.owner')=='olo-knowledge']
+                self.artifact('fixture-resources.json',json.dumps(resources,indent=2)+'\n')
+            except (ValueError,KeyError):pass
         if hasattr(self,'control'):
             output=ROOT/'build/qualification';output.mkdir(parents=True,exist_ok=True)
             log=subprocess.run(['docker','logs',self.control],capture_output=True,text=True,encoding='utf-8')
@@ -62,7 +70,7 @@ class Stack:
             log=subprocess.run(['docker','logs','--tail','200',container],capture_output=True,text=True,encoding='utf-8')
             safe=sanitized(log.stdout+log.stderr)
             self.artifact('fixture-component-'+str(number)+'.log',safe)
-        for container in reversed(self.containers): subprocess.run(['docker','rm','-f',container],capture_output=True)
+        for container in reversed(self.containers): subprocess.run(['docker','rm','-f','-v',container],capture_output=True)
         subprocess.run(['docker','volume','rm',self.volume,self.trust_volume],capture_output=True)
         for volume in self.model_volumes:subprocess.run(['docker','volume','rm',volume],capture_output=True)
         subprocess.run(['docker','network','rm',self.network],capture_output=True)
