@@ -269,10 +269,17 @@ class Pipeline(Stack):
         self.wait(lambda:self.model_calls()>before,'Model held after authorized context loading',60)
         began=time.monotonic()
         status,result=self.result('reviewer-1','rag.delete',self.kb,{'docId':doc})
-        self.require(status==200 and 'error' not in result,'Governed source deletion failed')
+        self.require(status==200 and result.get('deleted') is True,'Governed source deletion failed')
+        status,proof=self.result('reviewer-1','rag.query',self.kb,{
+            'type':'check','sources':[{'docId':doc,'version':1}]})
+        self.require(status==200 and proof.get('valid')==[],
+                     'Deleted source was not explicitly excluded by the live RAG authorization check')
         held.unlink()
         outcome=self.terminal(inflight)
         self.require('FAILED' in str(outcome),'In-flight turn released a response derived from a revoked source')
+        failures=docker('exec',self.temporal,'temporal','workflow','show',
+            '--workflow-id','run-'+self.tenant+'~'+inflight,'--output','json')
+        self.require('SecurityException' in failures,'Expected explicit authorization failure for in-flight source revocation')
         elapsed=time.monotonic()-began
         self.require(elapsed<=30,'In-flight revocation exceeded 30 seconds')
         status,stored=self.result('reviewer-1','memory.read',self.conversation,{'type':'turn','turnId':inflight})
