@@ -212,7 +212,12 @@ class Pipeline(Stack):
         return self.wait(completed,'Fresh governed Temporal turn',120)
 
     def recovered_replay(self,root,key,turn):
+        original=self.execution(turn)['execution']['runId']
         before=self.model_calls()
+        fresh_workflow=self.pipeline_directory/'workflows/qualification-chat.json'
+        changed=json.loads(fresh_workflow.read_text())
+        changed['nodes'][1]['configuration']['agentName']='another-unmapped-agent'
+        fresh_workflow.write_text(json.dumps(changed),encoding='utf-8')
         docker('kill',self.worker)
         docker('start',self.worker)
         self.ready(self.worker,lambda:json.loads(docker('inspect',self.worker))[0]['State']['Running'],
@@ -225,17 +230,20 @@ class Pipeline(Stack):
                 return response.status==200
         self.ready(self.backend,health,'Restarted backend',60)
         status,replayed=self.api_call(root+'/turns',{'message':self.canary},'POST',key)
-        self.require(status==202 and replayed.get('runId')==turn,'Recovery changed the original turn identity')
+        self.require(status==202 and replayed.get('runId')==turn,'Original request replay failed HTTP '+str(status))
+        self.require(self.execution(turn)['execution']['runId']==original,'Replay created a new Temporal execution for a completed turn')
         history=self.turn_history(root,turn)
         self.require(len(history['messages'])==2,'Recovery duplicated durable messages')
         self.require(self.model_calls()==before,'Recovery repeated a completed model activity')
         print('PASS hard worker stop, backend restart and original-request replay preserve one turn and two messages',flush=True)
 
+    def execution(self,turn):
+        return json.loads(docker('exec',self.temporal,'temporal','workflow','describe',
+            '--workflow-id','run-'+self.tenant+'~'+turn,'--output','json'))['workflowExecutionInfo']
+
     def terminal(self,turn):
         def closed():
-            info=json.loads(docker('exec',self.temporal,'temporal','workflow','describe',
-                '--workflow-id','run-'+self.tenant+'~'+turn,'--output','json'))
-            status=info['workflowExecutionInfo']['status']
+            status=self.execution(turn)['status']
             return status if 'RUNNING' not in str(status) else None
         return self.wait(closed,'Terminal governed workflow',120)
 
@@ -305,6 +313,7 @@ class Pipeline(Stack):
         self.artifact('pipeline.json',json.dumps(dict(passed=True,runId=self.name,
             scope='Real backend/worker/Temporal; scripted IdP and model. Development gRPC and Gateway-Control HTTP; no M10 transport/load signoff.',
             turnId=turn,tenant=self.tenant,historyEncrypted=True,completedTurnRestartReplay=True,
+            agentChangePreservesUserAuthority=True,
             revocation=revocation,images=images,
             knowledgeRevision=run(['git','rev-parse','HEAD'],cwd=ROOT,text=True).stdout.strip(),
             knowledgeWorktreeDirty=bool(run(['git','status','--porcelain'],cwd=ROOT,text=True).stdout.strip())),indent=2)+'\n')
