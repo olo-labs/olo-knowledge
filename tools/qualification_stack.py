@@ -171,7 +171,7 @@ class Stack:
         source="""import json,sys
 from pathlib import Path
 p=Path('/data/run/gateway.json');v=json.loads(p.read_text());v['listen']='0.0.0.0:8084';v['managementListen']='127.0.0.1:9094';v['trustedTlsProxy']=True
-v['tenantHosts']=[sys.argv[1]];v['limits']['maxBodyBytes']=1048576
+v['tenantHosts']=[sys.argv[1],'control:8084'];v['limits']['maxBodyBytes']=1048576
 v['userCredentials']={'issuer':'olo-qualification','audience':'toolgate-gateway','keys':[{'keyId':'qualification-user','publicKeyPath':'/data/run/qualification-users.pem'}]}
 Path('/data/run/qualification-gateway.json').write_text(json.dumps(v))
 """

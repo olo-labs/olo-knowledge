@@ -10,9 +10,27 @@ from unittest.mock import patch
 
 import import_qualification as importer
 import build_qualification as builder
+import build_pipeline_qualification as pipeline_builder
 
 
 class ImportQualificationTest(unittest.TestCase):
+    def test_pipeline_dirty_source_never_reaches_docker(self):
+        with patch.object(pipeline_builder.subprocess, 'check_output', return_value=' M Dockerfile\n'), \
+             patch.object(pipeline_builder.subprocess, 'run') as docker:
+            with self.assertRaisesRegex(ValueError, 'clean source checkout'):
+                pipeline_builder.build(pathlib.Path(__file__).parent,'fixture:test','Dockerfile')
+            docker.assert_not_called()
+
+    def test_pipeline_build_cannot_overwrite_unowned_application(self):
+        with patch.object(pipeline_builder.subprocess, 'check_output', return_value=''), \
+             patch.object(pipeline_builder.subprocess, 'run') as docker:
+            docker.return_value.returncode=0
+            docker.return_value.stdout=json.dumps([{'Config':{'Labels':{}}}])
+            with self.assertRaisesRegex(ValueError, 'unowned pipeline image'):
+                pipeline_builder.build(pathlib.Path(__file__).parent,'production:untouched','Dockerfile')
+            self.assertEqual(1,docker.call_count)
+            self.assertEqual(['docker','image','inspect','production:untouched'],docker.call_args.args[0])
+
     def test_dirty_source_is_rejected_before_any_build(self):
         with patch.object(builder.subprocess, 'check_output', return_value=' M VERSION\n'), \
              patch.object(builder.subprocess, 'run') as docker:

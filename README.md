@@ -164,6 +164,25 @@ and probes both loopback and internal authorities before any write. These checks
 Temporal/approval/derived-context or concurrent-load matrix. Simultaneous duplicates may receive admission
 conflicts; recovery reuses the original invocation ID and body after its owner settles, then verifies one record.
 
+`test -Pipeline` adds a separate fresh backend/worker/Temporal fixture. Build the owned application
+images from clean source checkouts first:
+
+```powershell
+python tools/build_pipeline_qualification.py --backend-source C:\path\to\olo --worker-source C:\path\to\olo-mono
+.\qualification.ps1 test -Pipeline -Python C:\path\to\python.exe
+# Or build all owned images while creating a new staging session:
+.\qualification.ps1 start -BuildImages -BuildPipelineImages -ToolGateSource C:\path\to\olo-toolgate -BackendSource C:\path\to\olo -WorkerSource C:\path\to\olo-mono
+```
+
+The pipeline creates a new workflow with no local tool registry. Its signed IdP tokens resolve through
+OLO's Redis identity store, and its worker obtains user-bound ToolGate credentials from the backend.
+The IdP and model are scripted qualification dependencies; model quality is not measured here.
+Temporal's pinned development server persists encrypted workflow payloads in an owned volume. This
+fixture uses development gRPC and Gateway HTTP inside its isolated network and cannot sign off M10's
+production transport, at-rest encryption or load requirements. `pipeline.json` records the run's actual
+pass/fail result; a failure is never inherited from a previous passing report. All fixture runtime data,
+including the Temporal volume and generated keys, is disposable.
+
 **Cleanup:** `stop` interrupts recorded fixture processes and removes this workspace's test containers,
 volumes, networks, probe images, the kind cluster, a newly downloaded session-owned node image, and private
 runtime files (generated credentials, keys and kubeconfig). Sanitized reports and source code remain.
