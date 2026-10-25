@@ -13,6 +13,7 @@ param(
     [string]$Python='python',
     [switch]$FullStack,
     [switch]$Pipeline,
+    [switch]$LatencyBaseline,
     [switch]$BuildImages,
     [switch]$BuildPipelineImages,
     [string]$BackendSource=(Join-Path $PSScriptRoot '../olo'),
@@ -65,7 +66,7 @@ function Stop-FixtureProcess {
         if($record.workspace -ne $Root -or $record.session -notmatch '^olo-qualification-[0-9a-f]{12}$'){throw 'Fixture process ownership mismatch'}
         $process=Get-CimInstance Win32_Process -Filter "ProcessId = $($record.pid)"
         if($process) {
-            if($process.Name -notmatch '^python(3)?(.exe)?$' -or ($record.script -notin @('qualification_stack.py','qualification_pipeline.py','test_services.py') -or $process.CommandLine -notlike "*$($record.script)*")){throw 'Refusing to terminate an unrelated process'}
+            if($process.Name -notmatch '^python(3)?(.exe)?$' -or ($record.script -notin @('qualification_stack.py','qualification_pipeline.py','qualification_latency.py','test_services.py') -or $process.CommandLine -notlike "*$($record.script)*")){throw 'Refusing to terminate an unrelated process'}
             Stop-Process -Id $record.pid -Force
             Wait-Process -Id $record.pid -ErrorAction SilentlyContinue
         }
@@ -138,6 +139,7 @@ if($Action -eq 'test') {
     if($Evaluation){Invoke-Checked $Python @((Join-Path $Root 'tools/test_services.py'),'--evaluation','--with-tls')}
     if($FullStack){Invoke-Checked $Python @((Join-Path $Root 'tools/qualification_stack.py'))}
     if($Pipeline){Invoke-Checked $Python @((Join-Path $Root 'tools/qualification_pipeline.py'))}
+    if($LatencyBaseline){Invoke-Checked $Python @((Join-Path $Root 'tools/qualification_latency.py'))}
     exit 0
 }
 if(Test-Path -LiteralPath $StateFile){throw 'A session already exists. Use status/test, or stop before a fresh installation.'}

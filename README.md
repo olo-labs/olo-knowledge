@@ -191,6 +191,11 @@ derived responses, and prevented the next model call using revoked context. Temp
 included base64 decoding; private canary text was absent from backend and worker logs. This is selected
 functional evidence, with explicitly scripted IdP/model dependencies, and does not close complete M8–M10.
 
+`test -LatencyBaseline` measures 16 fresh governed `rag.query` invocations after one warm-up, using one
+user and one document. It records every sample and the real Gateway p50/p95 in `gateway-latency.json`,
+and fails if even this latency floor exceeds 300/800 ms. It is a diagnostic lower-bound check and does
+not replace corpus quality, freshness or concurrent-load qualification.
+
 **Cleanup:** `stop` interrupts recorded fixture processes and removes this workspace's test containers,
 volumes, networks, probe images, the kind cluster, a newly downloaded session-owned node image, and private
 runtime files (generated credentials, keys and kubeconfig). Sanitized reports and source code remain.
