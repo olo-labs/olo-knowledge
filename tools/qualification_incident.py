@@ -146,6 +146,77 @@ class Incident(Pipeline):
         status,response=self.mcp('reviewer-1',method='tools/list',actor=self.actors[agent],gateway=self.incident_gateway)
         return {tool['name'] for tool in response.get('result',{}).get('tools',[])} if status==200 else set()
 
+    def qualify_approval_terminals(self):
+        def invoke(operation,arguments):
+            return self.mcp('reviewer-1',params=dict(name=self.tools['remediate'],arguments=arguments),operation=operation,
+                            actor=self.actors['remediation-agent'],gateway=self.incident_gateway)
+        def pending(label):
+            operation=str(uuid.uuid4())
+            arguments=dict(host='app-02',service='payments-api',action='ROLLBACK_DEPLOY',reference='INC-5001-'+label)
+            status,response=invoke(operation,arguments)
+            content=response.get('result',{}).get('structuredContent',{})
+            self.require(status==200 and content.get('state')=='PENDING_APPROVAL','Negative approval case was not pending')
+            approval=next(item for item in self.api('/approvals')['items'] if item['invocationId']==content['invocationId'])
+            return operation,arguments,approval
+        def review(approval,decision):
+            return http(self.origin+'/api/control/v1/approvals/'+approval['id']+'/decision',self.tokens['reviewer-2'],
+                dict(obligationId='incident-review',expectedRevision=approval['revision'],decision=decision),
+                'POST',{'Idempotency-Key':str(uuid.uuid4())})
+        evidence={}
+        operation,arguments,approval=pending('denied')
+        status,decision=review(approval,'DENY')
+        self.require(status==200 and decision.get('state')=='DENIED','Independent denial was not recorded')
+        status,response=invoke(operation,arguments)
+        ended=response.get('result',{}).get('structuredContent',{})
+        self.require(status==200 and ended.get('invocationId')==approval['invocationId'] and ended.get('state')=='FAILED',
+                     'Denied original operation restarted an approval wait or execution')
+        evidence['denial']=dict(invocationId=approval['invocationId'],state='FAILED')
+        operation,arguments,approval=pending('cancelled')
+        status,response=self.mcp('reviewer-1',method='olo/invocations/cancel',params={'operationId':operation},
+                                actor=self.actors['remediation-agent'],gateway=self.incident_gateway)
+        self.require(status==200 and response.get('result',{}).get('cancelled') is True,'Original operation cancellation failed')
+        status,response=invoke(operation,arguments)
+        ended=response.get('result',{}).get('structuredContent',{})
+        self.require(status==200 and ended.get('invocationId')==approval['invocationId'] and ended.get('state')=='CANCELLED',
+                     'Cancelled original operation resumed execution')
+        evidence['cancellation']=dict(invocationId=approval['invocationId'],state='CANCELLED')
+        operation,arguments,approval=pending('revoked-user')
+        grant=self.api('/grants/incident-human')
+        self.api('/grants/incident-human',{**grant,'enabled':False},'PUT',revision=grant['revision'])
+        try:
+            status,_=review(approval,'APPROVE')
+            self.require(status==403,'Approval manufactured a revoked user grant')
+            status,response=invoke(operation,arguments)
+            self.require(policy_denied(status,response),'Revoked user call did not receive an explicit authorization denial')
+        finally:
+            grant=self.api('/grants/incident-human')
+            self.api('/grants/incident-human',{**grant,'enabled':True},'PUT',revision=grant['revision'])
+        retained=self.api('/access/invocations/'+approval['invocationId'])
+        self.require(retained['state']=='PENDING_APPROVAL','Revoked user operation reached dispatch')
+        evidence['revokedUser']=dict(invocationId=approval['invocationId'],approvalDenied=True,dispatched=False)
+        # Exercise an actual authorization deadline without shortening the seven-day approval contract.
+        grant=self.api('/grants/incident-human')
+        self.api('/grants/incident-human',{**grant,'enabled':False},'PUT',revision=grant['revision'])
+        scope=self.scope(['remediate']);deadline=int(time.time()*1000)+8000
+        scope['conditions']['expiresAtUnixMs']=deadline
+        self.api('/grants',dict(id='incident-expiring',name='Bounded approval qualification',enabled=True,revision=1,
+                              sourceType='TEAM',sourceId='incident-users',purpose='HUMAN',scope=scope),'POST')
+        try:
+            operation,arguments,approval=pending('expired-authority')
+            self.wait(lambda:int(time.time()*1000)>deadline,'User grant authorization deadline',15)
+            status,_=review(approval,'APPROVE')
+            self.require(status==403,'Approval extended an expired user grant')
+            status,response=invoke(operation,arguments)
+            self.require(policy_denied(status,response),'Expired user authority did not block dispatch')
+            evidence['expiredAuthority']=dict(invocationId=approval['invocationId'],approvalDenied=True,dispatched=False)
+        finally:
+            for identifier,enabled in [('incident-expiring',False),('incident-human',True)]:
+                grant=self.api('/grants/'+identifier)
+                self.api('/grants/'+identifier,{**grant,'enabled':enabled},'PUT',revision=grant['revision'])
+        self.artifact('incident-terminal-approvals.json',json.dumps(evidence,indent=2)+'\n')
+        print('PASS real approval denial, cancellation, revoked user grants and expired authority block original operations',flush=True)
+        return evidence
+
     def qualify_incident(self):
         self.require(self.tools['remediate'] not in self.actor_catalog('triage-agent'), 'Triage catalog exposes remediation')
         status,denied=self.mcp('reviewer-2',params=dict(name=self.tools['remediate'],arguments=dict(
@@ -206,8 +277,14 @@ class Incident(Pipeline):
             cursor=page['nextCursor']
         self.require(seen==identifiers,'Missing ToolGate completion audit for an incident tool')
         self.artifact('incident-audit.json',json.dumps(audited,indent=2)+'\n')
+        terminals=self.qualify_approval_terminals()
+        images={name:dict(imageId=info['Id'],sourceRevision=(info['Config'].get('Labels') or {}).get('io.olo.qualification.source-revision',
+                        (info['Config'].get('Labels') or {}).get('org.opencontainers.image.revision')))
+                for name in ('olo-backend:olo-qualification','olo-worker:olo-qualification',self.image)
+                for info in json.loads(docker('image','inspect',name))}
         report = dict(passed=True, runId=self.name, turnId=turn, approvedInvocationId=approval['invocationId'],
             originalInvocationResumed=True,completionAuditVerified=True,packageSha256=hashlib.sha256(self.package.read_bytes()).hexdigest(),
+            approvalTerminals=terminals,images=images,
             knowledgeRevision=run(['git','rev-parse','HEAD'],cwd=ROOT,text=True).stdout.strip(),
             knowledgeWorktreeDirty=bool(run(['git','status','--porcelain'],cwd=ROOT,text=True).stdout.strip()),
             scope='Real backend/worker/Temporal/Gateway/Control/Tool Host and official fictional incident package; scripted model, development transport. Not complete M8/M10.')
