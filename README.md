@@ -251,4 +251,8 @@ resources through `qualification.ps1 stop`. Shared caches and sanitized reports 
 
 See [the operations runbook](docs/OPERATIONS.md) for least-privilege grants, reconciliation, backup/restore,
 credential/key rollover and retention requirements. These procedures and test commands do not count as acceptance
-until their reports pass. Full M8/M10 performance work remains deferred under ToolGate defect #204.
+until their reports pass. User-approved follow-ups are performance
+[ToolGate #204](https://github.com/olo-labs/olo-toolgate/issues/204), local PHP contract validation
+[ToolGate #205](https://github.com/olo-labs/olo-toolgate/issues/205), and production-environment qualification
+[olo-mono #19](https://github.com/olo-labs/olo-mono/issues/19). They do not waive functional fixes, legacy-code
+removal or the final local end-to-end regression, and do not establish production readiness.

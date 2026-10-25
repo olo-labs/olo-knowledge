@@ -121,7 +121,12 @@ purge ToolGate dedup state earlier than the accepted 37-day window or while an u
 Diagnostics should contain operation IDs, status and timing. They must omit credentials, prompts, retrieved text
 and model responses. Keep private test canaries out of saved transcripts and logs. Test redaction at every boundary.
 
-This runbook is a procedure, not evidence that its drills have passed. Full encrypted transport/at-rest controls,
-all credential rollovers, coordinated restore, retention enforcement and the 50-user/50,000-document quota/load
-run remain M10 acceptance gates until measured on the final stack. The local fixture uses development transport
-and a scripted model. Performance investigation under ToolGate defect #204 remains deferred by the user.
+This runbook is a procedure, not evidence that its drills have passed. On 2026-10-26 the user approved moving
+production transport/at-rest qualification, broader credential/key rollover, coordinated restore and production
+retention qualification to [olo-mono #19](https://github.com/olo-labs/olo-mono/issues/19). Performance acceptance
+is closed for the integration plan and tracked separately in [ToolGate #204](https://github.com/olo-labs/olo-toolgate/issues/204).
+Missing local PHP cross-language contract validation is deferred in
+[ToolGate #205](https://github.com/olo-labs/olo-toolgate/issues/205); PHP is not a memory/RAG runtime dependency.
+These are scope deferrals, not passing test results or production-readiness sign-off. The local fixture uses
+development transport and a scripted IdP/model. Local authorization, revocation/freshness, retry/cancellation,
+quotas, legacy-code removal and final clean-install regression remain required.
