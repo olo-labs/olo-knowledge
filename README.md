@@ -183,6 +183,14 @@ production transport, at-rest encryption or load requirements. `pipeline.json` r
 pass/fail result; a failure is never inherited from a previous passing report. All fixture runtime data,
 including the Temporal volume and generated keys, is disposable.
 
+The October 25 strict pipeline run passed from clean knowledge revision `1627f21`, worker `d73a978`
+and backend image source `f42b439`. A hard worker stop and backend restart/replay retained one Temporal
+execution, one model call and two durable messages. Switching to another unmapped agent did not change
+the user's memory/RAG authority. Source deletion blocked in-flight release in 9.53 s, denied stored
+derived responses, and prevented the next model call using revoked context. Temporal payload inspection
+included base64 decoding; private canary text was absent from backend and worker logs. This is selected
+functional evidence, with explicitly scripted IdP/model dependencies, and does not close complete M8–M10.
+
 **Cleanup:** `stop` interrupts recorded fixture processes and removes this workspace's test containers,
 volumes, networks, probe images, the kind cluster, a newly downloaded session-owned node image, and private
 runtime files (generated credentials, keys and kubeconfig). Sanitized reports and source code remain.
