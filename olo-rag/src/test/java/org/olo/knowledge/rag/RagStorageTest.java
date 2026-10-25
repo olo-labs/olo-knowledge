@@ -114,6 +114,69 @@ class RagStorageTest {
     }
 
     @Test
+    void concurrentReadersShareTheAuthorizationFenceWhileAnAclWriteWaits() throws Exception {
+        call(TENANT, "alice", "rag.ingest", document("shared source", 0));
+        call(TENANT, "alice", "rag.share", Map.of("kbId", kb, "member", "bob", "write", false));
+        entered = new CountDownLatch(2);
+        release = new CountDownLatch(1);
+        var pool = Executors.newFixedThreadPool(3);
+        try {
+            var first =
+                    pool.submit(
+                            () ->
+                                    call(
+                                            TENANT,
+                                            "alice",
+                                            "rag.query",
+                                            Map.of("kbId", kb, "query", "source")));
+            var second =
+                    pool.submit(
+                            () ->
+                                    call(
+                                            TENANT,
+                                            "bob",
+                                            "rag.query",
+                                            Map.of("kbId", kb, "query", "source")));
+            assertTrue(
+                    entered.await(2, TimeUnit.SECONDS), "Reads were serialized before embedding");
+            var unshare =
+                    pool.submit(
+                            () ->
+                                    call(
+                                            TENANT,
+                                            "alice",
+                                            "rag.share",
+                                            Map.of("kbId", kb, "member", "bob", "remove", true)));
+            release.countDown();
+            first.get(5, TimeUnit.SECONDS);
+            second.get(5, TimeUnit.SECONDS);
+            unshare.get(5, TimeUnit.SECONDS);
+            assertThrows(
+                    SecurityException.class,
+                    () -> call(TENANT, "bob", "rag.query", Map.of("kbId", kb, "query", "source")));
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void forcedReindexRepairsLostVectorsWithoutRevivingDeletedDocuments() throws Exception {
+        call(TENANT, "alice", "rag.ingest", document("restorable source", 0));
+        points.clear();
+        var request = Map.of("kbId", kb, "docId", doc, "type", "reindex", "force", true);
+        var repaired = json(call(TENANT, "alice", "rag.update", request));
+        assertEquals(2, repaired.path("version").asLong());
+        assertFalse(points.isEmpty());
+        assertFalse(
+                json(call(TENANT, "alice", "rag.query", Map.of("kbId", kb, "query", "source")))
+                        .path("chunks")
+                        .isEmpty());
+        call(TENANT, "alice", "rag.delete", Map.of("kbId", kb, "docId", doc));
+        assertThrows(SecurityException.class, () -> call(TENANT, "alice", "rag.update", request));
+    }
+
+    @Test
     void unauthorizedValidIdsAndOtherTenantAreRefused() throws Exception {
         call(TENANT, "alice", "rag.ingest", document("secret", 0));
         assertThrows(
