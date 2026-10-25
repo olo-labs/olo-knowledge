@@ -37,6 +37,15 @@ RAG additionally requires `QDRANT_ORIGIN`, `QDRANT_API_KEY`, `QDRANT_COLLECTION`
 `EMBEDDING_MODEL`, `EMBEDDING_DIGEST` (`sha256:<64 hex>`). Provision the Qdrant collection with cosine distance
 and the model's actual dimension; index keyword payloads `tenant`, `kb`, `model`, `docVersion`. Install the model
 before starting the service. Its digest is checked before/after embedding batches. A changed artifact fails closed.
+`EMBEDDING_THREADS` bounds CPU threads per embedding request (default 2, range 1–16).
+Tune it together with embedding replicas and concurrent requests; an unrestricted thread count
+can oversubscribe CPUs even for the small evaluation model. Use
+`python tools/test_services.py --profile-embeddings` with `KNOWLEDGE_EMBEDDING_THREADS=2`
+to profile the dependency separately; `--native-model-volume` also tests an owned disposable
+Docker model volume. These profiles do not replace the governed query and load tests.
+The component and full-stack qualification fixtures seed an owned native Docker volume
+from the downloaded model cache. Runtime model access stays on the Docker filesystem;
+the volume is removed after testing and by `qualification.ps1 stop` on recovery.
 Reindex through governed `rag.update` with `{type:"reindex",docId:"<uuid>"}`. The service loads the current
 source/version inside its authorized transaction; scheduled payloads contain references only. Publication is atomic. Never mutate a model tag in place while serving traffic. A dedicated embedding process has no outbound
 network after provisioning. The parser accepts only bounded UTF-8 text/plain and text/markdown, never URLs,
@@ -98,6 +107,18 @@ or operational recovery drills. Record actual evidence before counting those M6/
 
 ## Repeatable local staging qualification
 
+To qualify an accepted ToolGate CI build without rebuilding it, download that run's
+`quickstart-evidence` artifact, keeping `image.tar` and `SHA256SUMS` together, then run
+`./qualification.ps1 start -ImageArchive C:\path\to\image.tar -Python C:\path\to\python.exe`.
+The importer checks the archive checksum and streams the image into Docker under the
+owned `olo-toolgate-quickstart:olo-m8` tag. It refuses to overwrite an unowned tag.
+`stop` removes this imported image along with the owned staging resources. The downloaded
+artifact and sanitized reports remain available for reproducibility. Importing an image
+does not count as passing any acceptance gate; run the qualification tests afterward.
+For a source build, use `start -BuildImages -ToolGateSource C:\path\to\clean\checkout`.
+Source builds require a clean Git checkout and compile the UI from source, so the
+recorded revision also identifies the UI being tested.
+
 On Windows with Docker Desktop (Linux containers), Java 21, Python 3.11+ with `cryptography`, kubectl,
 and network access to the pinned official images:
 
@@ -134,9 +155,14 @@ it refuses to overwrite unowned image tags. The full-chain fixture provisions
 its own exact root grants, tenant-bound users and enrolled hosts, and uses separate application containers and
 PostgreSQL databases. It exchanges fixture platform assertions at the actual Control RFC 8693 endpoint using
 a dedicated fixture issuer key; Temporal pipeline recovery remains a separate gate. Its Gateway/Control loopback hop is a development fixture,
-not an assertion of encrypted transport throughout a production deployment. Full authorization/ingest qualification
-is still in progress: startup, token exchange and user ingress passed, but the first downstream write returned
-`OUTCOME_UNKNOWN` after a service rejection. It remains fenced rather than being retried as a new write.
+not an assertion of encrypted transport throughout a production deployment. The October 25 smoke run passed
+real governed writes, replay and concurrent duplicate recovery, private-resource isolation, forged identity
+arguments, RAG ingest/query, ACL narrowing, deletion and grant revocation. Measured exclusion times were
+2.92 s (document ACL), 2.84 s (deletion) and 0.30 s (grant revocation). ToolGate PR #203 fixes the epoch
+transaction required by service authorization. The fixture explicitly registers its internal Control hostname
+and probes both loopback and internal authorities before any write. These checks do not complete the full
+Temporal/approval/derived-context or concurrent-load matrix. Simultaneous duplicates may receive admission
+conflicts; recovery reuses the original invocation ID and body after its owner settles, then verifies one record.
 
 **Cleanup:** `stop` interrupts recorded fixture processes and removes this workspace's test containers,
 volumes, networks, probe images, the kind cluster, a newly downloaded session-owned node image, and private
@@ -147,9 +173,10 @@ Docker inventory errors fail cleanup explicitly; success requires a final check 
 containers, volumes, networks or images remain. Running `stop` again is safe. Downloaded build tools and
 shared dependency/model caches remain available for subsequent test runs; they are not running services.
 
-The October 24 component evaluation measured recall@5 1.00, precision@5 0.733, zero leakage and 750 correct
-citations. Its p95 component query latency was 2213 ms, above the accepted latency target. These results do
-not close M8.2a or the M10 50-user/50,000-document load gate.
+The October 25 component evaluation measured recall@5 1.00, precision@5 0.733, zero leakage and 750 correct
+citations. With two embedding CPU threads and native model storage, component query p50/p95 were 113/132 ms.
+The suite passed 25 tests with no skips. These results exclude Gateway overhead and do not close M8.2a or
+the M10 50-user/50,000-document load gate.
 
 For restoring a lost vector index from the retained SQL source, governed `rag.update` accepts
 `{type:"reindex",docId:"<uuid>",force:true}`. This publishes a new version even for the same embedding artifact;

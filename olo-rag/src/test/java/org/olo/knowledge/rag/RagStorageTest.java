@@ -19,6 +19,7 @@ class RagStorageTest {
     static Database db;
     String kb = UUID.randomUUID().toString(), doc = UUID.randomUUID().toString();
     List<VectorIndex.Point> points = new CopyOnWriteArrayList<>();
+    List<String> forcedCandidates;
     CountDownLatch entered, release;
     EmbeddingModel model =
             new EmbeddingModel() {
@@ -47,6 +48,7 @@ class RagStorageTest {
                         List<String> versions,
                         List<Double> vector,
                         int limit) {
+                    if (forcedCandidates != null) return forcedCandidates;
                     return points.stream()
                             .filter(
                                     p ->
@@ -111,6 +113,33 @@ class RagStorageTest {
             c.commit();
             return v;
         }
+    }
+
+    @Test
+    void candidateJoinPreservesRankAndRejectsPrivateAndDuplicateVectorHits() throws Exception {
+        call(TENANT, "alice", "rag.ingest", document("first public source", 0));
+        String first = points.getLast().id();
+        doc = UUID.randomUUID().toString();
+        call(TENANT, "alice", "rag.ingest", document("private source", 0));
+        String secret = points.getLast().id();
+        call(
+                TENANT,
+                "alice",
+                "rag.share",
+                Map.of("kbId", kb, "docId", doc, "member", "alice", "restricted", true));
+        doc = UUID.randomUUID().toString();
+        call(TENANT, "alice", "rag.ingest", document("second public source", 0));
+        String second = points.getLast().id();
+        call(TENANT, "alice", "rag.share", Map.of("kbId", kb, "member", "bob", "write", false));
+        // A faulty vector backend ignores the requested authorization filter.
+        // SQL must independently exclude its private hit and retain vector rank.
+        forcedCandidates = List.of(second, secret, first, second);
+        var chunks =
+                json(call(TENANT, "bob", "rag.query", Map.of("kbId", kb, "query", "source")))
+                        .path("chunks");
+        assertEquals(2, chunks.size());
+        assertEquals(second, chunks.get(0).path("chunk_id").asText());
+        assertEquals(first, chunks.get(1).path("chunk_id").asText());
     }
 
     @Test
