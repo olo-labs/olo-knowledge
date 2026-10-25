@@ -150,12 +150,16 @@ public final class KnowledgeServer {
                                         : origin[0].getClassName()
                                                 + "#"
                                                 + origin[0].getMethodName();
+                        String caller = origin.length < 2 ? "unknown" : origin[1].toString();
                         // Code locations only: never exception messages, request bodies, permits or
                         // credentials.
                         System.getLogger(KnowledgeServer.class.getName())
                                 .log(
                                         System.Logger.Level.WARNING,
-                                        "authorization_denied source=" + source);
+                                        "authorization_denied source="
+                                                + source
+                                                + " caller="
+                                                + caller);
                         safeReply(exchange, 403, "Access denied");
                     } catch (IllegalArgumentException invalid) {
                         safeReply(exchange, 400, "Invalid request");

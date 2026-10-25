@@ -11,13 +11,21 @@ import java.util.*;
 public final class OllamaEmbeddings implements EmbeddingModel {
     private final JsonHttp http;
     private final String model, digest;
+    private final int threads;
 
     public OllamaEmbeddings(URI origin, String model, String digest) throws Exception {
+        this(origin, model, digest, 2);
+    }
+
+    public OllamaEmbeddings(URI origin, String model, String digest, int threads) throws Exception {
+        if (threads < 1 || threads > 16)
+            throw new IllegalArgumentException("Embedding threads must be 1–16");
         if (!digest.matches("sha256:[a-f0-9]{64}"))
             throw new IllegalArgumentException("Pinned embedding digest required");
         this.http = new JsonHttp(origin, null);
         this.model = model;
         this.digest = digest;
+        this.threads = threads;
         checkModel();
     }
 
@@ -53,7 +61,9 @@ public final class OllamaEmbeddings implements EmbeddingModel {
                                 "truncate",
                                 false,
                                 "keep_alive",
-                                "5m"),
+                                "5m",
+                                "options",
+                                Map.of("num_thread", threads)),
                         32_000_000);
         if (!model.equals(json.path("model").asText()))
             throw new IllegalStateException("Embedding model mismatch");

@@ -1,6 +1,7 @@
 """Owned fresh real-Control/Gateway/Tool Host fixture. Never attaches to an existing installation."""
 import base64, contextlib, datetime, hashlib, importlib.util, json, os, pathlib, secrets, ssl
 import re, subprocess, sys, tempfile, time, urllib.error, urllib.request, urllib.parse, uuid
+from concurrent.futures import ThreadPoolExecutor
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -8,6 +9,13 @@ from cryptography.hazmat.primitives.serialization import pkcs12
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TOOLGATE = ROOT.parent / 'olo-toolgate'
+
+def policy_denied(status, response):
+    if status in (401,403):return True
+    if not isinstance(response,dict):return False
+    code=((response.get('error') or {}).get('data') or {}).get('code')
+    state=((response.get('result') or {}).get('structuredContent') or {}).get('state')
+    return code in ('UNAUTHORIZED','FORBIDDEN','TENANT_MISMATCH') or state=='DENIED'
 
 def run(args, **kwargs):
     if kwargs.get('text'):kwargs.setdefault('encoding','utf-8')
@@ -29,27 +37,34 @@ def http(url, token=None, body=None, method='GET', headers=None, context=None):
 class Stack:
     def __init__(self, image):
         self.image=image;self.name='olo-qualification-'+secrets.token_hex(6)
-        self.containers=[];self.volume=self.name+'-control';self.network=self.name+'-network';self.trust_volume=self.name+'-trust'
+        self.containers=[];self.model_volumes=[];self.backpressure_events=[];self.volume=self.name+'-control';self.network=self.name+'-network';self.trust_volume=self.name+'-trust'
         runtime=ROOT/'build/qualification/runtime';runtime.mkdir(parents=True,exist_ok=True)
         self.directory=tempfile.TemporaryDirectory(prefix=self.name+'-',dir=runtime)
         self.path=pathlib.Path(self.directory.name);self.tokens={};self.password=secrets.token_urlsafe(32)
         self.process_file=runtime/('fixture-process-'+str(os.getpid())+'.json')
         self.process_file.write_text(json.dumps({'workspace':str(ROOT),'pid':os.getpid(),'session':self.name,'script':'qualification_stack.py'}),encoding='utf-8')
+        self.artifact('real-stack.json',json.dumps({'passed':False,'stage':'STARTING','runId':self.name},indent=2)+'\n')
+    def artifact(self,name,value):
+        output=ROOT/'build/qualification'
+        for folder in [output,output/self.name]:
+            folder.mkdir(parents=True,exist_ok=True)
+            (folder/name).write_text(value,encoding='utf-8')
     def close(self):
         def sanitized(value):
             return re.sub(r'eyJ[A-Za-z0-9_.-]{40,}', '[redacted credential]', value.replace(self.password,'[redacted]'))
         if hasattr(self,'control'):
             output=ROOT/'build/qualification';output.mkdir(parents=True,exist_ok=True)
             log=subprocess.run(['docker','logs',self.control],capture_output=True,text=True,encoding='utf-8')
-            (output/'control-fixture.log').write_text(sanitized(log.stdout+log.stderr),encoding='utf-8')
+            self.artifact('control-fixture.log',sanitized(log.stdout+log.stderr))
             gateway=subprocess.run(['docker','exec',self.control,'cat','/data/run/qualification-gateway.log'],capture_output=True,text=True,encoding='utf-8')
-            (output/'gateway-fixture.log').write_text(sanitized(gateway.stdout),encoding='utf-8')
+            self.artifact('gateway-fixture.log',sanitized(gateway.stdout))
         for number,container in enumerate(self.containers):
             log=subprocess.run(['docker','logs','--tail','200',container],capture_output=True,text=True,encoding='utf-8')
             safe=sanitized(log.stdout+log.stderr)
-            (ROOT/'build/qualification'/('fixture-component-'+str(number)+'.log')).write_text(safe,encoding='utf-8')
+            self.artifact('fixture-component-'+str(number)+'.log',safe)
         for container in reversed(self.containers): subprocess.run(['docker','rm','-f',container],capture_output=True)
         subprocess.run(['docker','volume','rm',self.volume,self.trust_volume],capture_output=True)
+        for volume in self.model_volumes:subprocess.run(['docker','volume','rm',volume],capture_output=True)
         subprocess.run(['docker','network','rm',self.network],capture_output=True)
         self.directory.cleanup()
         self.process_file.unlink(missing_ok=True)
@@ -63,7 +78,8 @@ class Stack:
         self.assertion_key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
         (trust/'credential.key').write_bytes(self.credential_key.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()))
         (trust/'assertion-public.pem').write_bytes(self.assertion_key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo))
-        config={'TOOLGATE_CONTROL_USER_CREDENTIAL_ENABLED':'true','TOOLGATE_CONTROL_USER_CREDENTIAL_ISSUER':'olo-qualification',
+        config={'TOOLGATE_SINGLE_TENANT_HOSTS':'localhost,127.0.0.1,::1,control',
+            'TOOLGATE_CONTROL_USER_CREDENTIAL_ENABLED':'true','TOOLGATE_CONTROL_USER_CREDENTIAL_ISSUER':'olo-qualification',
             'TOOLGATE_CONTROL_USER_CREDENTIAL_PRIVATE_KEY_PATH':'/trust/credential.key','TOOLGATE_CONTROL_USER_CREDENTIAL_KEY_ID':'qualification-user',
             'TOOLGATE_CONTROL_USER_CREDENTIAL_BINDING_ID':self.binding,'TOOLGATE_CONTROL_USER_CREDENTIAL_SUBJECT_ISSUER':'https://quickstart.local',
             'TOOLGATE_CONTROL_USER_CREDENTIAL_SUBJECT_AUDIENCE':'toolgate-user-exchange','TOOLGATE_CONTROL_USER_CREDENTIAL_SUBJECT_KEY_ID':'qualification-backend',
@@ -201,7 +217,7 @@ Path('/data/run/qualification-gateway.json').write_text(json.dumps(v))
         run(['docker','exec','-i',postgres,'psql','-U','postgres','-v','ON_ERROR_STOP=1'],input=sql,text=True)
         publication=json.loads(self.exec('cat','/data/tenant-identity/publication.json'))
         client_ca=next(v['certificatePem'] for v in publication['publications'][0]['keys'] if v['purpose']=='DEVICE_CA')
-        self.install_paths={}
+        self.install_paths={};self.services={}
         for name in ['memory','rag']:
             ddl=(ROOT/'deploy/common.sql').read_text(encoding='utf-8')+(ROOT/f'deploy/{name}.sql').read_text(encoding='utf-8')
             ddl+='\nGRANT USAGE ON SCHEMA public TO '+name+'_app; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO '+name+'_app;'
@@ -215,6 +231,18 @@ Path('/data/run/qualification-gateway.json').write_text(json.dumps(v))
                 self.keytool('-importcert','-noprompt','-alias',alias,'-file',directory/(alias+'.crt'),'-keystore',directory/'trust.p12','-storetype','PKCS12')
             credential=self.script("import sys;sys.path.insert(0,'/opt/quickstart');import supervisor as s;print(s.jwt(['toolgate-service-olo-"+name+"'],'olo-"+name+"',directory_bound=False))")
             (directory/'control-token').write_text(credential,encoding='utf-8')
+            for endpoint in ['epoch','jwks']:
+                status,_=http(self.control_origin+'/api/control/v1/access/service-permits/olo-'+name+'/'+endpoint,
+                    credential,headers={'Toolgate-Tenant-ID':self.tenant},context=self.control_ssl)
+                self.require(status==200,'Dedicated '+name+' Control '+endpoint+' preflight refused HTTP '+str(status))
+                # Test the actual service DNS authority too. A loopback health
+                # check cannot prove that Control admits the internal hostname.
+                probe="import ssl,urllib.request,urllib.error\n"
+                probe+="r=urllib.request.Request("+repr('https://control:8443/api/control/v1/access/service-permits/olo-'+name+'/'+endpoint)+",headers="+repr({'Authorization':'Bearer '+credential,'Toolgate-Tenant-ID':self.tenant})+")\n"
+                probe+="try:\n print(urllib.request.urlopen(r,context=ssl.create_default_context(cafile='/trust/device-ca.crt'),timeout=5).status)\nexcept urllib.error.HTTPError as e:\n print(e.code)\n"
+                internal=run(['docker','exec','-i',self.control,'/opt/quickstart-python/bin/python','-'],input=probe,text=True).stdout.strip()
+                self.require(internal=='200','Internal '+name+' Control '+endpoint+' preflight refused HTTP '+internal)
+            print('PASS authenticated '+name+' Control authorization dependencies',flush=True)
             settings=dict(TENANT_ID=self.tenant,DATABASE_URL='jdbc:postgresql://postgres:5432/'+name+'?sslmode=disable',DATABASE_USER=name+'_app',DATABASE_PASSWORD=self.password,
                 TLS_KEYSTORE='/run/knowledge/server.p12',TLS_TRUSTSTORE='/run/knowledge/trust.p12',TLS_STORE_PASSWORD=self.password,CONTROL_ORIGIN='https://control:8443',CONTROL_ISSUER='control',CONTROL_CREDENTIAL_FILE='/run/knowledge/control-token')
             if name=='rag':settings.update(self.vector_settings())
@@ -225,14 +253,21 @@ Path('/data/run/qualification-gateway.json').write_text(json.dumps(v))
                 '--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=64m','--env-file',env_file,'-v',str(directory)+':/run/knowledge:ro',
                 '-v',str(install)+':/app:ro','eclipse-temurin:21-jre','/app/bin/olo-'+name)
             self.containers.append(container)
+            self.services[name]=container
         self.provision_packages()
     def vector_settings(self):
         if hasattr(self,'vectors'):return self.vectors
         qdrant=docker('run','--label','io.olo.qualification.owner=olo-knowledge','--rm','-d','--network',self.network,'--network-alias','qdrant','qdrant/qdrant:latest');self.containers.append(qdrant)
         models=ROOT/'build/ollama-models';models.mkdir(parents=True,exist_ok=True)
-        ollama=docker('run','--label','io.olo.qualification.owner=olo-knowledge','--rm','-d','--network',self.network,'--network-alias','ollama','-v',str(models)+':/root/.ollama','ollama/ollama:latest');self.containers.append(ollama)
+        model_volume=docker('volume','create','--label','io.olo.qualification.owner=olo-knowledge',self.name+'-models');self.model_volumes.append(model_volume)
+        docker('run','--rm','--label','io.olo.qualification.owner=olo-knowledge','--network','none',
+            '-v',str(models)+':/seed:ro','-v',model_volume+':/target','--entrypoint','sh','ollama/ollama:latest','-c','cp -a /seed/. /target/')
+        ollama=docker('run','--label','io.olo.qualification.owner=olo-knowledge','--rm','-d','--network',self.network,'--network-alias','ollama','-v',model_volume+':/root/.ollama','ollama/ollama:latest');self.containers.append(ollama)
         self.wait(lambda:subprocess.run(['docker','exec',ollama,'ollama','list'],capture_output=True).returncode==0,'Embedding readiness')
         docker('exec',ollama,'ollama','pull','all-minilm:latest')
+        if not (models/'manifests').exists():
+            docker('run','--rm','--label','io.olo.qualification.owner=olo-knowledge','--network','none',
+                '-v',model_volume+':/seed:ro','-v',str(models)+':/target','--entrypoint','sh','ollama/ollama:latest','-c','cp -a /seed/. /target/')
         script="""import json,urllib.request
 def send(url,body=None,method='GET'):
  r=urllib.request.Request(url,json.dumps(body).encode() if body is not None else None,{'Content-Type':'application/json'},method=method)
@@ -279,6 +314,11 @@ print(tag['digest'])
         end=time.monotonic()+45
         while time.monotonic()<end:
             status,response=self.call(user,operation,resource,request,logical_id)
+            data=(((response or {}).get('error') or {}).get('data') or {})
+            unknown=data.get('outcome')=='OUTCOME_UNKNOWN' or (data.get('error') or {}).get('code')=='OUTCOME_UNKNOWN'
+            if status in (429,503) and not unknown:
+                self.backpressure_events.append(status)
+                time.sleep(.5);continue
             if status!=200 or 'error' in response:return status,response
             result=response['result'];structured=result.get('structuredContent',{})
             if structured.get('state') in ['QUEUED','ADMITTED','EXECUTING']:
@@ -299,6 +339,9 @@ print(tag['digest'])
             status,result=value
             self.require(status==200 and 'error' not in result and 'result' not in result,'Governed operation failed: '+json.dumps(result))
             return result
+        def scope_denials(name):
+            logs=run(['docker','logs',self.services[name]],text=True)
+            return (logs.stdout+logs.stderr).count('authorization_denied source=org.olo.knowledge.core.Scope#denied')
         # Resource IDs are selected before authorization and grants bind those exact roots.
         self.wait(lambda:'olo.memory/append' in {v['name'] for v in self.mcp('reviewer-1','tools/list')[1].get('result',{}).get('tools',[])},'Governed tool placement')
         successful(self.result('reviewer-1','memory.append',self.conversation,{'type':'create','create':True}))
@@ -310,20 +353,59 @@ print(tag['digest'])
         history=successful(self.result('reviewer-1','memory.read',self.conversation,{'type':'turn','turnId':turn}))
         self.require(len(history['messages'])==1,'Replay duplicated an accepted message')
         mark('same logical invocation and stable message ID return one durable record')
+        concurrent_turn=str(uuid.uuid4());concurrent_operation=str(uuid.uuid4())
+        concurrent_body={**body,'messageId':str(uuid.uuid4()),'turnId':concurrent_turn}
+        with ThreadPoolExecutor(max_workers=4) as callers:
+            repeats=list(callers.map(lambda _:self.result('reviewer-1','memory.append',self.conversation,concurrent_body,concurrent_operation),range(4)))
+        completed=0
+        for status,response in repeats:
+            if response.get('error',{}).get('data',{}).get('code')=='CONFLICT':
+                # Control may reject a simultaneous duplicate while the first
+                # request owns admission. Retry only this exact original ID and
+                # body after the concurrent owner has settled, never a new ID.
+                continue
+            successful((status,response));completed+=1
+        self.require(completed>0,'No concurrent caller completed the original invocation')
+        for _ in repeats:
+            successful(self.result('reviewer-1','memory.append',self.conversation,concurrent_body,concurrent_operation))
+        history=successful(self.result('reviewer-1','memory.read',self.conversation,{'type':'turn','turnId':concurrent_turn}))
+        self.require(len(history['messages'])==1,'Concurrent retries duplicated an accepted message')
+        mark('concurrent replay of the original invocation retains one durable memory record')
+        before=scope_denials('memory')
         status,denied=self.result('reviewer-2','memory.read',self.conversation,{'budget':4000})
         self.require(status!=200 or 'messages' not in denied,'Other user read a private conversation')
+        self.require(scope_denials('memory')>before,'Expected storage ACL denial; dependency failures cannot pass isolation')
         mark('user isolation with a real valid ToolGate grant and known root ID')
+        before=scope_denials('memory')
+        status,denied=self.result('reviewer-2','memory.read',self.conversation,{'budget':4000,'userId':'reviewer-1','tenantId':self.tenant,'agentName':'incident-commander'})
+        self.require(status!=200 or 'messages' not in denied,'Forged identity arguments released private memory')
+        self.require(scope_denials('memory')>before,'Forged identity test did not reach an explicit storage ACL denial')
+        mark('caller-supplied user, tenant and agent arguments cannot authorize private memory')
         status,denied=self.mcp('reviewer-1',params={'name':'olo.memory/read','arguments':{'conversationId':self.conversation,'request':'{}'}},token=self.credential('reviewer-1',tenant=str(uuid.uuid4())))
         self.require(status in [401,403],'Foreign-tenant credential admitted')
         mark('cross-tenant credential rejected at authenticated ingress')
         status,denied=self.result('reviewer-1','memory.read',str(uuid.uuid4()),{'budget':4000})
-        self.require(status!=200 or 'messages' not in denied,'Substituted root escaped the exact resource grant')
+        self.require(policy_denied(status,denied),'Substituted root must produce an explicit authorization denial')
         mark('substituted resource ID rejected before storage release')
         doc=str(uuid.uuid4())
         successful(self.result('reviewer-1','rag.ingest',self.kb,dict(docId=doc,create=True,content='The fictional Aurora project launches in December.',mediaType='text/plain',expectedVersion=0)))
         found=successful(self.result('reviewer-1','rag.query',self.kb,{'query':'When does Aurora launch?'}))
         self.require(any(v['doc_id']==doc and v['version']==1 for v in found['chunks']),'Published document missing')
         mark('real governed RAG ingest, embeddings, filtered retrieval and versioned citations')
+        before=scope_denials('rag')
+        status,denied=self.result('reviewer-2','rag.query',self.kb,{'query':'When does Aurora launch?'})
+        self.require(status!=200 or 'chunks' not in denied,'Other user read a private knowledge base')
+        self.require(scope_denials('rag')>before,'Expected RAG storage ACL denial; dependency failures cannot pass isolation')
+        successful(self.result('reviewer-1','rag.share',self.kb,{'member':'reviewer-2','write':False}))
+        shared=successful(self.result('reviewer-2','rag.query',self.kb,{'query':'When does Aurora launch?'}))
+        self.require(any(v['doc_id']==doc for v in shared['chunks']),'Explicitly shared document missing')
+        began=time.monotonic()
+        successful(self.result('reviewer-1','rag.share',self.kb,{'docId':doc,'member':'reviewer-1','restricted':True}))
+        restricted=successful(self.result('reviewer-2','rag.query',self.kb,{'query':'When does Aurora launch?'}))
+        self.require(not restricted['chunks'],'Narrowed document ACL released a private source')
+        timings['documentAclExclusionSeconds']=time.monotonic()-began
+        self.require(timings['documentAclExclusionSeconds']<=30,'Document ACL exclusion exceeds revocation bound')
+        mark('governed document ACL narrowing excludes a previously shared source within 30 seconds')
         began=time.monotonic()
         successful(self.result('reviewer-1','rag.delete',self.kb,{'docId':doc}))
         found=successful(self.result('reviewer-1','rag.query',self.kb,{'query':'When does Aurora launch?'}))
@@ -335,20 +417,30 @@ print(tag['digest'])
         began=time.monotonic()
         self.api('/grants/knowledge-human',{**grant,'enabled':False},'PUT',revision=grant['revision'])
         status,result=self.result('reviewer-1','memory.read',self.conversation,{'budget':4000})
-        self.require(status!=200 or 'messages' not in result,'Revoked grant released memory')
+        self.require(policy_denied(status,result),'Revoked grant must produce an explicit authorization denial')
         timings['grantRevocationSeconds']=time.monotonic()-began
         self.require(timings['grantRevocationSeconds']<=30,'Grant revocation exceeds 30 seconds')
         mark('live Control grant revocation blocks result retrieval within 30 seconds')
-        report={'passed':True,'gates':gates,'timings':timings,'scope':'Owned current-source Quickstart plus separate memory/RAG JVM containers and databases. Gateway-Control loopback HTTP fixture; no CNI, staging load or complete Temporal pipeline claim.',
+        tested_image=json.loads(docker('image','inspect',self.image))[0]
+        report={'passed':True,'gates':gates,'timings':timings,
+            'imageId':tested_image['Id'],
+            'toolgateRevision':(tested_image['Config'].get('Labels') or {}).get('org.opencontainers.image.revision'),
+            'knowledgeRevision':run(['git','rev-parse','HEAD'],cwd=ROOT,text=True).stdout.strip(),
+            'knowledgeWorktreeDirty':bool(run(['git','status','--porcelain'],cwd=ROOT,text=True).stdout.strip()),
+            'backpressureRetries':len(self.backpressure_events),
+            'scope':'Owned Quickstart plus separate memory/RAG JVM containers and databases. Gateway-Control loopback HTTP fixture; no CNI, staging load or complete Temporal pipeline claim.',
             'userCredentialExchange':'Actual Control RFC 8693 endpoint, fixture platform assertions and dedicated production issuer key configuration'}
-        output=ROOT/'build/qualification/real-stack.json';output.parent.mkdir(parents=True,exist_ok=True)
-        output.write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
+        report['runId']=self.name
+        self.artifact('real-stack.json',json.dumps(report,indent=2)+'\n')
         return report
 
 @contextlib.contextmanager
 def fresh_stack(image='olo-toolgate-quickstart:olo-m8'):
     stack=Stack(image)
     try:yield stack.start()
+    except BaseException as failure:
+        stack.artifact('real-stack.json',json.dumps({'passed':False,'stage':'FAILED','runId':stack.name,'failureType':type(failure).__name__},indent=2)+'\n')
+        raise
     finally:stack.close()
 
 if __name__=='__main__':

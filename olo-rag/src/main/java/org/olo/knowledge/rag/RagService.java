@@ -330,24 +330,46 @@ public final class RagService {
                         embeddings.embed(List.of(question)).getFirst(),
                         5);
         var results = new ArrayList<Map<String, Object>>();
-        int budget = 0;
-        for (String cid : found) {
-            Json.uuid(cid);
-            var matches =
+        // Join all candidates to current SQL publication and ACL state in one
+        // round trip. Keep vector rank when assembling the authorized result.
+        var current = new HashMap<String, Map<String, Object>>();
+        if (!found.isEmpty()) {
+            var arguments =
+                    new ArrayList<Object>(
+                            List.of(
+                                    s.tenant(),
+                                    kb,
+                                    embeddings.version(),
+                                    s.subject(),
+                                    s.subject(),
+                                    s.subject(),
+                                    s.subject()));
+            for (String cid : found) arguments.add(Json.uuid(cid));
+            var placeholders = String.join(",", Collections.nCopies(found.size(), "?::uuid"));
+            for (var hit :
                     rows(
                             c,
                             "SELECT c.doc_id,c.version,c.chunk_id,c.content,c.ordinal FROM"
                                 + " rag_chunk c JOIN rag_document d ON d.tenant=c.tenant AND"
                                 + " d.kb_id=c.kb_id AND d.doc_id=c.doc_id AND d.version=c.version"
-                                + " WHERE c.tenant=? AND c.kb_id=?::uuid AND c.chunk_id=?::uuid AND"
-                                + " NOT d.deleted AND d.model=?",
-                            s.tenant(),
-                            kb,
-                            cid,
-                            embeddings.version());
-            if (matches.isEmpty()) continue;
-            var hit = matches.getFirst();
-            if (!documentAllowed(c, s, kb, hit.get("doc_id").toString(), false)) continue;
+                                + " JOIN knowledge_resource r ON r.tenant=d.tenant AND r.id=d.kb_id"
+                                + " WHERE c.tenant=? AND c.kb_id=?::uuid AND d.model=? AND NOT"
+                                + " d.deleted AND NOT r.deleted AND (d.owner_id=? OR r.owner_id=?"
+                                + " OR EXISTS (SELECT 1 FROM rag_document_member m WHERE"
+                                + " m.tenant=d.tenant AND m.kb_id=d.kb_id AND m.doc_id=d.doc_id AND"
+                                + " m.subject=?) OR (NOT d.acl_restricted AND EXISTS (SELECT 1 FROM"
+                                + " knowledge_member m WHERE m.tenant=d.tenant AND"
+                                + " m.resource_id=d.kb_id AND m.subject=?))) AND c.chunk_id IN ("
+                                    + placeholders
+                                    + ")",
+                            arguments.toArray())) {
+                current.put(hit.get("chunk_id").toString(), hit);
+            }
+        }
+        int budget = 0;
+        for (String cid : found) {
+            var hit = current.remove(cid);
+            if (hit == null) continue;
             int size = hit.get("content").toString().getBytes(StandardCharsets.UTF_8).length;
             if (budget + size > 4000) continue;
             budget += size;

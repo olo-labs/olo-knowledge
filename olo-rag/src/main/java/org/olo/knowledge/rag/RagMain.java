@@ -14,7 +14,8 @@ public final class RagMain {
                 new OllamaEmbeddings(
                         URI.create(KnowledgeServer.env("EMBEDDING_ORIGIN")),
                         KnowledgeServer.env("EMBEDDING_MODEL"),
-                        KnowledgeServer.env("EMBEDDING_DIGEST"));
+                        KnowledgeServer.env("EMBEDDING_DIGEST"),
+                        Integer.parseInt(System.getenv().getOrDefault("EMBEDDING_THREADS", "2")));
         var index =
                 new QdrantIndex(
                         URI.create(KnowledgeServer.env("QDRANT_ORIGIN")),

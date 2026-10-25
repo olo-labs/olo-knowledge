@@ -13,10 +13,13 @@ param(
     [string]$Python='python',
     [switch]$FullStack,
     [switch]$BuildImages,
+    [string]$ToolGateSource=(Join-Path $PSScriptRoot '../olo-toolgate'),
+    [string]$ImageArchive,
     [switch]$Evaluation
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+if($BuildImages -and $ImageArchive){throw 'Choose BuildImages or ImageArchive, not both'}
 $Root=$PSScriptRoot
 $Runtime=Join-Path $Root 'build/qualification/runtime'
 $Reports=Join-Path $Root 'build/qualification'
@@ -159,7 +162,8 @@ nodes:
 - role: worker
 '@ | Set-Content -LiteralPath $config -Encoding utf8
 try {
-    if($BuildImages){Invoke-Checked $Python @((Join-Path $Root 'tools/build_qualification.py'))}
+    if($BuildImages){Invoke-Checked $Python @((Join-Path $Root 'tools/build_qualification.py'),'--source',$ToolGateSource)}
+    if($ImageArchive){Invoke-Checked $Python @((Join-Path $Root 'tools/import_qualification.py'),$ImageArchive)}
     # Ready requires the CNI, installed immediately after the API server is available.
     & $Kind create cluster --name $Cluster --image $NodeImage --config $config --kubeconfig $Kubeconfig
     $creationCode=$LASTEXITCODE

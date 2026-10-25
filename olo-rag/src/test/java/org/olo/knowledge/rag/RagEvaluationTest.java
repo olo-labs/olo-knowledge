@@ -31,7 +31,8 @@ class RagEvaluationTest {
                 new OllamaEmbeddings(
                         URI.create(System.getenv("KNOWLEDGE_OLLAMA")),
                         "all-minilm:latest",
-                        System.getenv("KNOWLEDGE_MODEL_DIGEST"));
+                        System.getenv("KNOWLEDGE_MODEL_DIGEST"),
+                        2);
         var origin = URI.create(System.getenv("KNOWLEDGE_QDRANT"));
         String collection = "evaluation_" + UUID.randomUUID().toString().replace("-", "");
         new JsonHttp(origin, null)
@@ -175,6 +176,10 @@ class RagEvaluationTest {
         report.put("documents", 200);
         report.put("queries", 150);
         report.put("model", model.version());
+        report.put("embeddingThreads", 2);
+        report.put(
+                "modelStorage",
+                System.getenv().getOrDefault("KNOWLEDGE_MODEL_STORAGE", "unspecified"));
         report.put(
                 "transport",
                 "service component, real PostgreSQL/Qdrant/Ollama; excludes Gateway and mTLS");
