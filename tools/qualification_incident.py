@@ -174,6 +174,7 @@ class Incident(Pipeline):
         operation,arguments,approval=pending('cancelled')
         status,response=self.mcp('reviewer-1',method='olo/invocations/cancel',params={'operationId':operation},
                                 actor=self.actors['remediation-agent'],gateway=self.incident_gateway)
+        self.artifact('incident-cancellation.json',json.dumps(dict(status=status,response=response),indent=2)+'\n')
         self.require(status==200 and response.get('result',{}).get('cancelled') is True,'Original operation cancellation failed')
         status,response=invoke(operation,arguments)
         ended=response.get('result',{}).get('structuredContent',{})
