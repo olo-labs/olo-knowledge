@@ -43,7 +43,7 @@ class Stack:
         self.path=pathlib.Path(self.directory.name);self.tokens={};self.password=secrets.token_urlsafe(32)
         self.process_file=runtime/('fixture-process-'+str(os.getpid())+'.json')
         self.process_file.write_text(json.dumps({'workspace':str(ROOT),'pid':os.getpid(),'session':self.name,'script':'qualification_stack.py'}),encoding='utf-8')
-        self.artifact('real-stack.json',json.dumps({'passed':False,'stage':'STARTING','runId':self.name},indent=2)+'\n')
+        self.artifact('fixture.json',json.dumps({'passed':False,'stage':'STARTING','runId':self.name},indent=2)+'\n')
     def artifact(self,name,value):
         output=ROOT/'build/qualification'
         for folder in [output,output/self.name]:
@@ -109,7 +109,7 @@ class Stack:
             '--entrypoint','/opt/quickstart-python/bin/python',self.image,'-c',
             "import os,shutil,pathlib;p=pathlib.Path('/trust');shutil.copytree('/seed',p,dirs_exist_ok=True);os.chown(p,65532,65532);p.chmod(0o700);[(os.chown(f,65532,65532),f.chmod(0o600)) for f in p.iterdir()]")
         self.control=docker('run','--label','io.olo.qualification.owner=olo-knowledge','-d','--name',self.name,'--network',self.network,'--network-alias','control',
-            '-p','127.0.0.1::8080','-p','127.0.0.1::8443','-p','127.0.0.1::8084',
+            '-p','127.0.0.1::8080','-p','127.0.0.1::8443','-p','127.0.0.1::8084','-p','127.0.0.1::8085',
             '-e','TOOLGATE_ALLOW_LOOPBACK_MCP_HTTP=true','--env-file',environment,'-v',self.volume+':/data',
             '-v',self.trust_volume+':/trust',self.image)
         self.containers.append(self.control)
@@ -209,16 +209,18 @@ Path('/data/run/qualification-gateway.json').write_text(json.dumps(v))
         def encode(v):return base64.urlsafe_b64encode(json.dumps(v,separators=(',',':')).encode()).rstrip(b'=')
         unsigned=encode({'alg':'RS256','typ':'toolgate-user-credential+jws','kid':'qualification-user'})+b'.'+encode(claims)
         return (unsigned+b'.'+base64.urlsafe_b64encode(self.credential_key.sign(unsigned,padding.PKCS1v15(),hashes.SHA256())).rstrip(b'=')).decode()
-    def mcp(self,user,method='tools/call',params=None,operation=None,token=None):
+    def mcp(self,user,method='tools/call',params=None,operation=None,token=None,actor=None,gateway=None):
         operation=operation or str(uuid.uuid4())
         body={'jsonrpc':'2.0','id':operation,'method':method,'params':{**(params or {}),'_meta':{'io.modelcontextprotocol/protocolVersion':'2026-07-28','io.modelcontextprotocol/clientCapabilities':{}}}}
         headers={'Accept':'application/json, text/event-stream','MCP-Protocol-Version':'2026-07-28','MCP-Method':method}
         if method=='tools/call':headers['MCP-Name']=params['name']
-        return http(self.gateway+'/mcp',token or self.credential(user),body,'POST',headers)
+        if actor:headers['X-ToolGate-Actor-Credential']=actor
+        return http((gateway or self.gateway)+'/mcp',token or self.credential(user),body,'POST',headers)
     def start_services(self):
         # Separate application databases and roles. Bootstrap SQL is sent on stdin, never in argv/logs.
         env=dict(os.environ,POSTGRES_PASSWORD=self.password)
         postgres=run(['docker','run','--label','io.olo.qualification.owner=olo-knowledge','--rm','-d','--network',self.network,'--network-alias','postgres','-e','POSTGRES_PASSWORD','postgres:16'],env=env,text=True).stdout.strip()
+        self.postgres=postgres
         self.containers.append(postgres)
         self.wait(lambda:subprocess.run(['docker','exec',postgres,'pg_isready','-U','postgres'],capture_output=True).returncode==0,'Service PostgreSQL readiness')
         sql="CREATE ROLE memory_app LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '"+self.password+"'; CREATE ROLE rag_app LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '"+self.password+"'; CREATE DATABASE memory; CREATE DATABASE rag;"

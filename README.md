@@ -11,6 +11,10 @@ Build/publish the sibling ToolGate SDK with `publishJavaSdkLocally` and its cont
 Then run Gradle 8.12 `:olo-memory:installDist :olo-rag:installDist` here. Build the two Java SDK packages in
 `packages/` with Gradle 9.7.1 `build toolgatePackage`. Each declares the exact permission and root resource;
 the executor broker adds the permit and client certificate. Packages never see database credentials or signing keys.
+For the Windows qualification fixture without a host CLI, run `python tools/build_packages.py --gradle <Gradle-9.7.1-executable>`
+after building the owned ToolGate image. It retains SDK build/check/staging tasks and packs with the matching container CLI.
+Protected service writes declare `MANUAL` reconciliation: their single-use service permits cannot be reissued
+by retrying an unknown operation. Reconcile their storage receipts under a fresh read authorization before settlement.
 
 `python tools/test_services.py --with-vectors --with-tls` owns disposable PostgreSQL 16, Qdrant and Ollama containers,
 downloads/caches the small `all-minilm:latest` evaluation artifact under ignored `build/`, and removes its containers.
@@ -213,3 +217,38 @@ the M10 50-user/50,000-document load gate.
 For restoring a lost vector index from the retained SQL source, governed `rag.update` accepts
 `{type:"reindex",docId:"<uuid>",force:true}`. This publishes a new version even for the same embedding artifact;
 normal scheduled reindex remains a no-op when the artifact is unchanged. A tombstone still refuses rebuilding.
+
+### Incident, operational drills and governed debug
+
+`qualification.ps1 test -Incident -IncidentPackage <official-server-recovery.tgpkg>` provisions three separate
+delegated agent ceilings and an ordinary signed-in user. A scripted test model selects calls from each actual
+catalog; real backend/worker/Temporal/Gateway/Control/Tool Host components execute the official fictional
+`examples.incidents` package. The requester cannot self-approve. Independent approval must resume the original
+remediation invocation, and all seven tool calls must succeed exactly once with the right user, actor and resource.
+The workflow uses explicit sequential orchestration, followed by a tool-free commander summary.
+
+`qualification.ps1 test -Operations` runs a disposable knowledge-store restore and database-password rotation
+drill. It encrypts quiesced PostgreSQL archives with a process-only AES-GCM drill key, restores empty owned stores,
+checks private ACLs/tombstones, reindexes retained SQL sources and checks old/new database credentials. A forced
+post-permit SQL failure must remain `OUTCOME_UNKNOWN`; repairing SQL and replaying the exact operation cannot
+redispatch it. This does not establish coordinated ToolGate/Temporal restore or qualify every credential rotation.
+Generated evidence is `incident.json`, `incident-invocations.json` and `operations.json` under `build/qualification/`.
+
+For an interactive owned debug stack, after building the qualification application images:
+
+```powershell
+.\governed-debug.ps1 up -Python C:\path\to\python.exe
+.\governed-debug.ps1 check
+.\governed-debug.ps1 down
+```
+
+The adjacent mono checkout exposes the same stack through `debug/debug.ps1 up -ToolGate
+-QualificationPython C:\path\to\python.exe`, with `check`, `status`, `logs`, `collect` and `down` actions.
+This selects a separate fresh governed fixture, including backend, worker, Temporal, provisioned ToolGate and
+memory/RAG services; it uses development transport and a scripted IdP/model. It requires no legacy debug compose
+stack. The hidden fixture process remains alive for inspection until `down`, which removes all owned runtime
+resources through `qualification.ps1 stop`. Shared caches and sanitized reports remain.
+
+See [the operations runbook](docs/OPERATIONS.md) for least-privilege grants, reconciliation, backup/restore,
+credential/key rollover and retention requirements. These procedures and test commands do not count as acceptance
+until their reports pass. Full M8/M10 performance work remains deferred under ToolGate defect #204.

@@ -98,7 +98,7 @@ public final class RagPackage {
             businessKeyNamespace = KeyNamespace.TENANT,
             effect = EffectSafety.IDEMPOTENT,
             routes = "ingest",
-            reconciliation = Reconciliation.DOWNSTREAM_IDEMPOTENCY)
+            reconciliation = Reconciliation.MANUAL)
     public Result ingest(
             @Param(description = "Opaque resource UUID", minLength = 36, maxLength = 36)
                     String kbId,
@@ -132,7 +132,7 @@ public final class RagPackage {
             businessKeyNamespace = KeyNamespace.TENANT,
             effect = EffectSafety.IDEMPOTENT,
             routes = "update",
-            reconciliation = Reconciliation.DOWNSTREAM_IDEMPOTENCY)
+            reconciliation = Reconciliation.MANUAL)
     public Result update(
             @Param(description = "Opaque resource UUID", minLength = 36, maxLength = 36)
                     String kbId,
@@ -166,7 +166,7 @@ public final class RagPackage {
             businessKeyNamespace = KeyNamespace.TENANT,
             effect = EffectSafety.IDEMPOTENT,
             routes = "delete",
-            reconciliation = Reconciliation.DOWNSTREAM_IDEMPOTENCY)
+            reconciliation = Reconciliation.MANUAL)
     public Result delete(
             @Param(description = "Opaque resource UUID", minLength = 36, maxLength = 36)
                     String kbId,
@@ -200,7 +200,7 @@ public final class RagPackage {
             businessKeyNamespace = KeyNamespace.TENANT,
             effect = EffectSafety.IDEMPOTENT,
             routes = "share",
-            reconciliation = Reconciliation.DOWNSTREAM_IDEMPOTENCY)
+            reconciliation = Reconciliation.MANUAL)
     public Result share(
             @Param(description = "Opaque resource UUID", minLength = 36, maxLength = 36)
                     String kbId,

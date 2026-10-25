@@ -67,9 +67,18 @@ def workflow():
 
 
 class Pipeline(Stack):
+    workflow_id = 'qualification-chat'
+    report_name = 'pipeline.json'
+
+    def workflow_definitions(self):
+        return [workflow()]
+
+    def configure_worker(self, config):
+        return config
+
     def __init__(self):
         super().__init__('olo-toolgate-quickstart:olo-m8')
-        self.artifact('pipeline.json',json.dumps(dict(passed=False,stage='STARTING',runId=self.name))+'\n')
+        self.artifact(self.report_name,json.dumps(dict(passed=False,stage='STARTING',runId=self.name))+'\n')
         record=json.loads(self.process_file.read_text())
         record['script']='qualification_pipeline.py'
         self.process_file.write_text(json.dumps(record),encoding='utf-8')
@@ -95,7 +104,8 @@ class Pipeline(Stack):
     def start_pipeline(self):
         directory=self.path/'pipeline';directory.mkdir()
         configs=directory/'workflows';configs.mkdir()
-        (configs/'qualification-chat.json').write_text(json.dumps(workflow()),encoding='utf-8')
+        for definition in self.workflow_definitions():
+            (configs/(definition['id']+'.json')).write_text(json.dumps(definition),encoding='utf-8')
         idp=directory/'idp';idp.mkdir()
         key,cert=self.certificate('fixture-idp')
         (idp/'server.crt').write_bytes(cert.public_bytes(serialization.Encoding.PEM))
@@ -143,7 +153,7 @@ class Pipeline(Stack):
             'olo.security.bootstrap-memberships[0].subject':'reviewer-1','olo.security.bootstrap-memberships[0].tenants[0]':self.tenant,
             'spring.data.redis.host':'redis','spring.data.redis.port':'6379',
             'olo.cache.host':'redis','olo.cache.port':'6379','olo.temporal.target':'temporal:7233',
-            'olo.configuration.dir':'/run/olo/workflows','olo.chat.pipeline':'qualification-chat',
+            'olo.configuration.dir':'/run/olo/workflows','olo.chat.pipeline':self.workflow_id,
             'olo.chat.callback-base-url':'https://olo:7080','olo.toolgate.gateway-url':'http://control:8084/mcp',
             'olo.toolgate.credentials.enabled':'true','olo.toolgate.credentials.control-url':'https://control:8443',
             'olo.toolgate.credentials.service-token-path':'/run/olo/exchange.token',
@@ -176,7 +186,7 @@ class Pipeline(Stack):
             temporal=dict(namespace='default',target='temporal:7233'),cache=dict(enabled=False),
             toolgate=dict(enabled=True,mcpUrl='http://control:8084/mcp',userCredentialsUrl='https://olo:7080',
                           delegatedAgents=True,agentMappings=[],reservedPrincipals=['olo-platform-service'],timeoutMs=20000,maxToolRounds=8))
-        (directory/'worker.json').write_text(json.dumps(config))
+        (directory/'worker.json').write_text(json.dumps(self.configure_worker(config)))
         worker={**common,'OLO_WORKER_CONFIG_PATH':'/run/olo/worker.json','OLO_LLM_BASE_URL':'http://fixture-idp:11434'}
         envfile=directory/'worker.env';envfile.write_text('\n'.join(k+'='+v for k,v in worker.items())+'\n')
         self.worker=self.own('olo-worker:olo-qualification','worker','--env-file',str(envfile),'-v',str(directory)+':/run/olo:ro')

@@ -1,0 +1,230 @@
+"""Real delegated incident package and Temporal approval qualification; scripted test model only."""
+import argparse
+import hashlib
+import json
+import pathlib
+import secrets
+import time
+import uuid
+
+from qualification_pipeline import Pipeline, workflow
+from qualification_stack import ROOT, docker, http, policy_denied, run
+
+AGENTS = {
+    'triage-agent': ['incidents', 'host-status', 'crash-report'],
+    'remediation-agent': ['runbook', 'remediate', 'verify'],
+    'incident-report-agent': ['update-incident'],
+}
+
+
+def incident_workflow():
+    definition = workflow()
+    definition.update(id='incident-recovery', label='Incident recovery qualification')
+    definition['capability']['id'] = 'incident-recovery'
+    template = definition['nodes'][1]
+    agents = []
+    for name in [*AGENTS, 'incident-commander']:
+        node = json.loads(json.dumps(template))
+        node['id'] = name
+        node['execution']['workflowRef']['workflowId'] = 'incident-recovery'
+        node['configuration'].update(agentName=name, maxToolRounds=0 if name == 'incident-commander' else 5,
+                                     promptTemplate='Resolve fictional INC-5001. {message}')
+        agents.append(node)
+    definition['nodes'] = [definition['nodes'][0], *agents, definition['nodes'][-1]]
+    ids = [node['id'] for node in definition['nodes']]
+    definition['edges'] = [dict(id=a+'-'+b, sourceNodeId=a, sourcePortId='out', targetNodeId=b, targetPortId='in')
+                           for a, b in zip(ids, ids[1:])]
+    return definition
+
+
+class Incident(Pipeline):
+    workflow_id = 'incident-recovery'
+    report_name = 'incident.json'
+
+    def __init__(self, package):
+        super().__init__()
+        self.package = package.resolve(strict=True)
+        record = json.loads(self.process_file.read_text())
+        record['script'] = 'qualification_incident.py'
+        self.process_file.write_text(json.dumps(record))
+        self.artifact('incident.json', json.dumps(dict(passed=False, runId=self.name, stage='STARTING'))+'\n')
+
+    def workflow_definitions(self):
+        return [incident_workflow()]
+
+    def configure_worker(self, config):
+        config['toolgate'].update(mcpUrl='http://control:8085/mcp', credentialsDir='/run/olo/actors', agentMappings=[dict(
+            tenant=self.tenant, workflow=self.workflow_id, agents=list(AGENTS))])
+        directory = self.path/'pipeline'
+        actors = directory/'actors'
+        actors.mkdir()
+        for name, token in self.actors.items():
+            (actors/(name+'.token')).write_text(token)
+        plan = [('incidents', {'priority': 'P1'}), ('host-status', {'host': 'app-02'}),
+                ('crash-report', {'host': 'app-02'}), ('runbook', {'cause': 'OOM'}),
+                ('remediate', dict(host='app-02', service='payments-api', action='ROLLBACK_DEPLOY', reference='INC-5001-qualify')),
+                ('verify', {'remediationId': 'REM-00000000'}),
+                ('update-incident', dict(incidentId='INC-5001', status='RESOLVED', note='Qualified rollback and verification.', reference='INC-5001-report'))]
+        (directory/'idp/incident-plan.json').write_text(json.dumps([
+            (self.tools[name].replace('.', '_').replace('/', '_'), arguments) for name, arguments in plan]))
+        return config
+
+    def scope(self, names):
+        return dict(toolGroups=dict(ids=['default-tools'], all=False), deviceGroups=dict(ids=['default-devices'], all=False),
+                    actions=['invoke'], allActions=False,
+                    resources=[dict(kind='CUSTOM', locator='tool://'+self.tools[name], match='EXACT') for name in names],
+                    conditions=dict(notBeforeUnixMs=0, expiresAtUnixMs=0, networkCidrs=[], devicePosture=[], regions=[],
+                                    hoursUtc=[], requireOnline=True, highRisk=False))
+
+    def provision_incident(self):
+        status, uploaded = http(self.origin+'/api/control/v1/packages/uploads', self.tokens['admin'],
+                                self.package.read_bytes(), 'POST', {'Content-Type': 'application/vnd.ololabs.toolgate.package+zip',
+                                                                   'Idempotency-Key': str(uuid.uuid4())})
+        self.require(status in (200, 201), 'Incident package upload failed HTTP '+str(status))
+        deployment = self.api('/packages/deployments', dict(packageDigest=uploaded['packageDigest'], globals={}, hostIds=['tool-host-local']), 'POST')
+        self.tools = {tool.rsplit('/', 1)[-1]: tool for tool in deployment['toolIds']}
+        self.require(set(self.tools) == {name for names in AGENTS.values() for name in names}, 'Unexpected incident package tools')
+        for tool in self.tools.values():
+            entry = self.api('/tools/'+tool)
+            self.api('/tools/'+tool, {**entry, 'enabled': True}, 'PUT', revision=entry['revision'])
+        binding = self.api('/bindings/binding-default')
+        self.api('/bindings', {**binding, 'id': 'binding-incident', 'name': 'Incident qualification', 'revision': 1,
+                              'actions': ['invoke'], 'allowedPackageDigests': [uploaded['packageDigest'].removeprefix('sha256:')]}, 'POST')
+        self.api('/teams', dict(id='incident-users', name='Incident requesters', enabled=True, revision=1, userIds=['reviewer-1'], roleIds=[]), 'POST')
+        # Bootstrap reviewers are super-administrators. The requester must be an ordinary user,
+        # otherwise the documented break-glass review override invalidates an independence test.
+        knowledge=self.api('/grants/knowledge-human')
+        self.api('/grants/knowledge-human',{**knowledge,'sourceId':'incident-users'},'PUT',revision=knowledge['revision'])
+        administrators=self.api('/teams/installation-administrators')
+        self.api('/teams/installation-administrators',{**administrators,
+            'userIds':[user for user in administrators['userIds'] if user!='reviewer-1']},
+            'PUT',revision=administrators['revision'])
+        full = self.scope(list(self.tools))
+        self.api('/grants', dict(id='incident-human', name='Incident user grant', enabled=True, revision=1,
+                                sourceType='TEAM', sourceId='incident-users', purpose='HUMAN', scope=full), 'POST')
+        self.actors = {}
+        records = []
+        for agent, names in AGENTS.items():
+            self.api('/agents', dict(id=agent, name=agent, enabled=True, revision=1, ownerUserId='reviewer-1'), 'POST')
+            group = agent+'-group'
+            self.api('/agent-groups', dict(id=group, name=group, enabled=True, revision=1, agentIds=[agent], roleIds=[]), 'POST')
+            scope = self.scope(names)
+            self.api('/grants', dict(id=agent+'-ceiling', name=agent+' ceiling', enabled=True, revision=1,
+                                    sourceType='AGENT_GROUP', sourceId=group, purpose='CAPABILITY', scope=scope), 'POST')
+            self.api('/delegations', dict(id=agent+'-delegation', name=agent+' delegation', enabled=True, revision=1,
+                                         teamId='incident-users', agentGroupId=group, scope=scope), 'POST')
+            token = secrets.token_urlsafe(48)
+            digest = hashlib.sha256(token.encode()).hexdigest()
+            workload = agent+'-workload'
+            self.api('/workload-bindings', dict(id=workload, name=workload, enabled=True, revision=1, agentId=agent,
+                mode='DELEGATED', issuer='gateway', subject=workload, audience='gateway', credentialSha256=digest,
+                credentialEpoch=1, expiresAtUnixMs=int(time.time()*1000)+3600000), 'POST')
+            records.append(dict(tokenSha256=digest, expiresAtUnixMs=int(time.time()*1000)+3600000,
+                context=dict(requestId='incident-actor', tenantId=self.tenant, mode='DELEGATED', credentialKind='STATIC_TOKEN',
+                             agentId=agent, workloadBindingId=workload, chain=[], credentialEpoch=1,
+                             bindingId='binding-incident', credentialSha256=digest)))
+            self.actors[agent] = token
+        # A dedicated Gateway credential file keeps the supervisor's own credentials independent.
+        self.script("from pathlib import Path;import json,sys; p=Path('/data/run/incident-credentials.json');"
+                    "p.write_text(json.dumps(json.loads(Path('/data/run/credentials.json').read_text())+json.loads(sys.argv[1])))", json.dumps(records))
+        self.script("from pathlib import Path; p=Path('/data/run/qualification-gateway.json');"
+                    "import json,sys;v=json.loads(p.read_text());v['listen']='0.0.0.0:8085';v['managementListen']='127.0.0.1:9095';"
+                    "v['tenantHosts']=['control:8085',sys.argv[1]];Path('/data/run/incident-gateway.json').write_text(json.dumps(v))",
+                    '127.0.0.1:'+json.loads(docker('inspect',self.control))[0]['NetworkSettings']['Ports']['8085/tcp'][0]['HostPort'])
+        docker('exec', '-d', self.control, 'env', 'TOOLGATE_GATEWAY_CONFIG=/data/run/incident-gateway.json',
+               'TOOLGATE_GATEWAY_CREDENTIALS=/data/run/incident-credentials.json', 'sh', '-c',
+               'exec /usr/local/bin/olo-toolgate-gateway > /data/run/incident-gateway.log 2>&1')
+        self.api('/policies', dict(id='incident-review', name='Independent rollback approval', enabled=True, revision=1,
+            scope=self.scope(['remediate']), decision='ASK', teams=dict(ids=[], all=True), agentGroups=dict(ids=[], all=True),
+            approverTeams=dict(ids=['installation-administrators'], all=False)), 'POST')
+        self.incident_gateway='http://127.0.0.1:'+json.loads(docker('inspect',self.control))[0]['NetworkSettings']['Ports']['8085/tcp'][0]['HostPort']
+        self.wait(lambda:self.actor_catalog('triage-agent') == {self.tools[name] for name in AGENTS['triage-agent']},
+                  'Deployed delegated incident catalog',120)
+        return self
+
+    def actor_catalog(self,agent):
+        status,response=self.mcp('reviewer-1',method='tools/list',actor=self.actors[agent],gateway=self.incident_gateway)
+        return {tool['name'] for tool in response.get('result',{}).get('tools',[])} if status==200 else set()
+
+    def qualify_incident(self):
+        self.require(self.tools['remediate'] not in self.actor_catalog('triage-agent'), 'Triage catalog exposes remediation')
+        status,denied=self.mcp('reviewer-2',params=dict(name=self.tools['remediate'],arguments=dict(
+            host='app-02',service='payments-api',action='ROLLBACK_DEPLOY',reference='INC-5001-denied')),
+            actor=self.actors['remediation-agent'],gateway=self.incident_gateway)
+        self.require(policy_denied(status,denied), 'Agent ceiling substituted for missing user grant')
+        root = '/api/v1/conversations/'+self.conversation
+        status, _ = self.api_call(root, method='POST')
+        self.require(status == 200, 'Incident conversation creation failed')
+        status, accepted = self.api_call(root+'/turns', {'message': 'Resolve fictional INC-5001.'}, 'POST')
+        self.require(status == 202, 'Incident turn admission failed')
+        turn = accepted['runId']
+        def pending():
+            items = self.api('/approvals')['items']
+            return next((item for item in items if item.get('state') == 'PENDING'), None)
+        approval = self.wait(pending, 'Real incident approval', 180)
+        invocation = self.api('/access/invocations/'+approval['invocationId'])
+        self.require(invocation['state'] == 'PENDING_APPROVAL', 'Remediation ran before independent approval')
+        decision = dict(obligationId='incident-review', expectedRevision=approval['revision'], decision='APPROVE')
+        status, _ = http(self.origin+'/api/control/v1/approvals/'+approval['id']+'/decision',
+                         self.tokens['reviewer-1'], decision, 'POST', {'Idempotency-Key': str(uuid.uuid4())})
+        self.require(status == 403, 'Requester approved their own remediation')
+        self.api('/approvals/'+approval['id']+'/decision', decision, 'POST', user='reviewer-2')
+        history = self.turn_history(root, turn)
+        self.require(sorted(v['role'] for v in history['messages']) == ['assistant', 'user'], 'Incident turn duplicated durable messages')
+        original = self.api('/access/invocations/'+approval['invocationId'])
+        self.require(original['state'] == 'SUCCEEDED', 'Approved original invocation did not succeed')
+        invocations = self.api('/access/invocations?limit=100')['items']
+        completed = [item for item in invocations if item['evaluation']['toolId'] in self.tools.values()
+                     and item['state']=='SUCCEEDED']
+        self.require(len(completed)==7 and {item['evaluation']['toolId'] for item in completed}==set(self.tools.values()),
+                     'Incident tools did not each succeed exactly once')
+        evidence=[]
+        expected={self.tools[name]:agent for agent,names in AGENTS.items() for name in names}
+        for item in completed:
+            evaluation=item['evaluation'];context=evaluation['context']
+            self.require(context['mode']=='DELEGATED' and context['userId']=='reviewer-1'
+                         and context['agentId']==expected[evaluation['toolId']], 'Incident call has incorrect subject or actor')
+            self.require(evaluation['resources']==[dict(kind='CUSTOM',locator='tool://'+evaluation['toolId'])],
+                         'Incident call did not bind the exact tool resource')
+            evidence.append(dict(invocationId=item['id'], tool=evaluation['toolId'], subject=context['userId'],
+                                 actor=context['agentId'], state=item['state'], resources=evaluation['resources']))
+        self.artifact('incident-invocations.json',json.dumps(evidence,indent=2)+'\n')
+        audited=[];cursor='0';seen=set()
+        identifiers={item['id'] for item in completed}
+        for _ in range(100):
+            page=self.api('/audit?cursor='+cursor+'&limit=100')
+            for event in page['items']:
+                detail=event.get('evidence') or {}
+                if detail.get('invocationId') in identifiers:
+                    self.require(detail.get('mode')=='DELEGATED' and detail.get('subjectUserId')=='reviewer-1'
+                                 and detail.get('actorAgentId')==expected[detail['toolId']],
+                                 'ToolGate audit lost the delegated subject or actor')
+                    audited.append({key:event[key] for key in ('sequence','operation','target','requestId','evidence')})
+                    if detail.get('state')=='SUCCEEDED':seen.add(detail['invocationId'])
+            if 'nextCursor' not in page:break
+            self.require(page['nextCursor']!=cursor,'Audit cursor did not advance')
+            cursor=page['nextCursor']
+        self.require(seen==identifiers,'Missing ToolGate completion audit for an incident tool')
+        self.artifact('incident-audit.json',json.dumps(audited,indent=2)+'\n')
+        report = dict(passed=True, runId=self.name, turnId=turn, approvedInvocationId=approval['invocationId'],
+            originalInvocationResumed=True,completionAuditVerified=True,packageSha256=hashlib.sha256(self.package.read_bytes()).hexdigest(),
+            knowledgeRevision=run(['git','rev-parse','HEAD'],cwd=ROOT,text=True).stdout.strip(),
+            knowledgeWorktreeDirty=bool(run(['git','status','--porcelain'],cwd=ROOT,text=True).stdout.strip()),
+            scope='Real backend/worker/Temporal/Gateway/Control/Tool Host and official fictional incident package; scripted model, development transport. Not complete M8/M10.')
+        self.artifact('incident.json', json.dumps(report, indent=2)+'\n')
+        print('PASS real delegated incident stages and independent approval resume the original invocation', flush=True)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--package', type=pathlib.Path, required=True)
+    instance = Incident(parser.parse_args().package)
+    try:
+        instance.start().start_services()
+        instance.provision_incident().start_pipeline()
+        instance.qualify_incident()
+    except BaseException as error:
+        instance.artifact('incident.json',json.dumps(dict(passed=False,runId=instance.name,failureType=type(error).__name__))+'\n')
+        raise
+    finally:
+        instance.close()
