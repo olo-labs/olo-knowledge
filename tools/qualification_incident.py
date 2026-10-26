@@ -22,19 +22,52 @@ def incident_workflow():
     definition.update(id='incident-recovery', label='Incident recovery qualification')
     definition['capability']['id'] = 'incident-recovery'
     template = definition['nodes'][1]
-    agents = []
-    for name in [*AGENTS, 'incident-commander']:
-        node = json.loads(json.dumps(template))
-        node['id'] = name
-        node['execution']['workflowRef']['workflowId'] = 'incident-recovery'
-        node['configuration'].update(agentName=name, maxToolRounds=0 if name == 'incident-commander' else 5,
-                                     promptTemplate='Resolve fictional INC-5001. {message}')
-        agents.append(node)
-    definition['nodes'] = [definition['nodes'][0], *agents, definition['nodes'][-1]]
-    ids = [node['id'] for node in definition['nodes']]
+    commander = json.loads(json.dumps(template))
+    commander['id'] = 'commander'
+    commander['execution']['workflowRef']['workflowId'] = 'incident-recovery'
+    commander['configuration'].update(agentCallPlanner=True, outputVariable='agentCallSequenceJson',
+        continueNodeId='summary', maxInvalidJsonRetries=3, maxToolRounds=0,
+        promptTemplate='INCIDENT_DELEGATION_CATALOG:\n{availableAgentsJson}\n'
+                       'Delegate incident triage, remediation and reporting in order. Return agentCalls JSON only. {message}')
+    commander['ports'].append(dict(id='agentPlug', schema='agent-plug', type='agent-plug', direction='INPUT'))
+    summary = json.loads(json.dumps(template))
+    summary['id'] = 'summary'
+    summary['execution']['workflowRef']['workflowId'] = 'incident-recovery'
+    summary['configuration'].update(agentName='incident-commander', maxToolRounds=0,
+        promptTemplate='Summarize the completed incident child-agent results. {agentResultsJson}')
+    plugins = []
+    for name in AGENTS:
+        plugins.append(dict(id='delegate-'+name, type='AGENT', label=name,
+            ports=[dict(id='agentPlug', schema='agent-plug', type='agent-plug', direction='OUTPUT')],
+            execution=dict(executionKind='SUBWORKFLOW', executionModel='CHILD_WORKFLOW',
+                workflowRef=dict(workflowId=name, version='1.0.0', inputMapping={}, outputMapping={})),
+            configuration=dict(delegateAgentId=name)))
+    definition['nodes'] = [definition['nodes'][0], commander, summary, definition['nodes'][-1], *plugins]
     definition['edges'] = [dict(id=a+'-'+b, sourceNodeId=a, sourcePortId='out', targetNodeId=b, targetPortId='in')
-                           for a, b in zip(ids, ids[1:])]
+                           for a, b in [('start','commander'),('commander','summary'),('summary','end')]]
+    definition['edges'] += [dict(id='plug-'+name, sourceNodeId='delegate-'+name, sourcePortId='agentPlug',
+                                targetNodeId='commander', targetPortId='agentPlug') for name in AGENTS]
+    definition['childWorkflows'] = [dict(workflowId=name, workflowVersion='1.0.0') for name in AGENTS]
+    definition['availableAgents'] = [dict(id=name) for name in AGENTS]
+    definition['metadata']['returnOutputKey'] = 'summary'
+    definition['variables'] += [dict(name=name, type=kind, scope='LOCAL', **({'defaultValue':default} if default is not None else {}))
+        for name,kind,default in [('agentCallSequenceJson','string',None),('availableAgentsJson','string','[]'),
+                                 ('agentResultsJson','string','[]'),('agentCallSequenceJsonRetryCount','integer',0),
+                                 ('agentCallSequenceJsonValidationError','string',None)]]
     return definition
+
+
+def incident_child_workflows():
+    children = []
+    for name in AGENTS:
+        child = workflow()
+        child.update(id=name, label=name, isDefault=False, isChildWorkflow=True)
+        child['capability']['id'] = name
+        child['nodes'][1]['execution']['workflowRef']['workflowId'] = name
+        child['nodes'][1]['configuration'].update(agentName=name, maxToolRounds=5,
+            promptTemplate='Complete your delegated fictional INC-5001 stage. {message}')
+        children.append(child)
+    return children
 
 
 class Incident(Pipeline):
@@ -50,11 +83,11 @@ class Incident(Pipeline):
         self.artifact('incident.json', json.dumps(dict(passed=False, runId=self.name, stage='STARTING'))+'\n')
 
     def workflow_definitions(self):
-        return [incident_workflow()]
+        return [incident_workflow(), *incident_child_workflows()]
 
     def configure_worker(self, config):
         config['toolgate'].update(mcpUrl='http://control:8085/mcp', credentialsDir='/run/olo/actors', agentMappings=[dict(
-            tenant=self.tenant, workflow=self.workflow_id, agents=list(AGENTS))])
+            tenant=self.tenant, workflow=name, agents=[name]) for name in AGENTS])
         directory = self.path/'pipeline'
         actors = directory/'actors'
         actors.mkdir()
@@ -238,7 +271,7 @@ class Incident(Pipeline):
         root = '/api/v1/conversations/'+self.conversation
         status, _ = self.api_call(root, method='POST')
         self.require(status == 200, 'Incident conversation creation failed')
-        status, accepted = self.api_call(root+'/turns', {'message': 'Resolve fictional INC-5001.'}, 'POST')
+        status, accepted = self.api_call(root+'/turns', {'message': 'Resolve fictional INC-5001. '+self.canary}, 'POST')
         self.require(status == 202, 'Incident turn admission failed')
         turn = accepted['runId']
         def pending():
@@ -247,6 +280,9 @@ class Incident(Pipeline):
         approval = self.wait(pending, 'Real incident approval', 180)
         invocation = self.api('/access/invocations/'+approval['invocationId'])
         self.require(invocation['state'] == 'PENDING_APPROVAL', 'Remediation ran before independent approval')
+        # Crash the actual worker after triage and during the child remediation's ASK wait.
+        docker('kill', self.worker)
+        docker('start', self.worker)
         decision = dict(obligationId='incident-review', expectedRevision=approval['revision'], decision='APPROVE')
         status, _ = http(self.origin+'/api/control/v1/approvals/'+approval['id']+'/decision',
                          self.tokens['reviewer-1'], decision, 'POST', {'Idempotency-Key': str(uuid.uuid4())})
@@ -256,6 +292,14 @@ class Incident(Pipeline):
         self.require(sorted(v['role'] for v in history['messages']) == ['assistant', 'user'], 'Incident turn duplicated durable messages')
         original = self.api('/access/invocations/'+approval['invocationId'])
         self.require(original['state'] == 'SUCCEEDED', 'Approved original invocation did not succeed')
+        raw = docker('exec', self.temporal, 'temporal', 'workflow', 'show',
+                     '--workflow-id', 'run-'+self.tenant+'~'+turn, '--output', 'json')
+        events = json.loads(raw)['events']
+        started = [event['startChildWorkflowExecutionInitiatedEventAttributes'] for event in events
+                   if 'startChildWorkflowExecutionInitiatedEventAttributes' in event]
+        completed_children = [event for event in events if 'childWorkflowExecutionCompletedEventAttributes' in event]
+        self.require(len(started)==3 and len(completed_children)==3,
+                     'Commander did not start and complete exactly three real Temporal child workflows')
         invocations = self.api('/access/invocations?limit=100')['items']
         completed = [item for item in invocations if item['evaluation']['toolId'] in self.tools.values()
                      and item['state']=='SUCCEEDED']
@@ -290,12 +334,16 @@ class Incident(Pipeline):
         self.require(seen==identifiers,'Missing ToolGate completion audit for an incident tool')
         self.artifact('incident-audit.json',json.dumps(audited,indent=2)+'\n')
         terminals=self.qualify_approval_terminals()
+        for container in (self.backend, self.worker, self.control, *self.services.values()):
+            logs=run(['docker','logs',container],text=True)
+            self.require(self.canary not in logs.stdout+logs.stderr,'Private incident text leaked into diagnostics')
         images={name:dict(imageId=info['Id'],sourceRevision=(info['Config'].get('Labels') or {}).get('io.olo.qualification.source-revision',
                         (info['Config'].get('Labels') or {}).get('org.opencontainers.image.revision')))
                 for name in ('olo-backend:olo-qualification','olo-worker:olo-qualification',self.image)
                 for info in json.loads(docker('image','inspect',name))}
         report = dict(passed=True, runId=self.name, turnId=turn, approvedInvocationId=approval['invocationId'],
             originalInvocationResumed=True,completionAuditVerified=True,packageSha256=hashlib.sha256(self.package.read_bytes()).hexdigest(),
+            commanderGeneratedDelegation=True, temporalChildWorkflows=3, workerCrashDuringChildApproval=True,
             approvalTerminals=terminals,images=images,
             knowledgeRevision=run(['git','rev-parse','HEAD'],cwd=ROOT,text=True).stdout.strip(),
             knowledgeWorktreeDirty=bool(run(['git','status','--porcelain'],cwd=ROOT,text=True).stdout.strip()),

@@ -37,6 +37,21 @@ def incident_reply(request, plan):
     return {'role': 'assistant', 'content': 'Scripted incident stage complete.'}
 
 
+def incident_delegation_reply(request):
+    """The test planner consumes the rendered agent catalog rather than inventing delegation authority."""
+    marker = 'INCIDENT_DELEGATION_CATALOG:\n'
+    content = next((str(message.get('content','')) for message in request.get('messages', [])
+                    if marker in str(message.get('content',''))), None)
+    if content is None:
+        return None
+    catalog, _ = json.JSONDecoder().raw_decode(content.split(marker,1)[1].lstrip())
+    allowed = {entry['agentId'] for entry in catalog}
+    calls = [dict(agentId=name, message='Complete your delegated INC-5001 stage.')
+             for name in ['triage-agent','remediation-agent','incident-report-agent'] if name in allowed]
+    return {'role':'assistant','content':json.dumps(dict(agentCalls=calls,
+        directResponse=None if calls else 'No incident agents are available.'))}
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -75,9 +90,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if (ROOT/'hold-model').exists():
             return self.reply(503, {'error': 'Fixture model deadline'})
         message = {'role': 'assistant', 'content': (ROOT/'reply.txt').read_text()}
-        if (ROOT/'incident-plan.json').exists() and request.get('tools'):
+        if (ROOT/'incident-plan.json').exists():
             try:
-                message = incident_reply(request, json.loads((ROOT/'incident-plan.json').read_text()))
+                if request.get('tools'):
+                    message = incident_reply(request, json.loads((ROOT/'incident-plan.json').read_text()))
+                else:
+                    message = incident_delegation_reply(request) or message
             except ValueError:
                 return self.reply(503, {'error': 'Incident prerequisite missing'})
         self.reply(200, {'model': request.get('model'), 'done': True, 'message': message})

@@ -225,7 +225,10 @@ delegated agent ceilings and an ordinary signed-in user. A scripted test model s
 catalog; real backend/worker/Temporal/Gateway/Control/Tool Host components execute the official fictional
 `examples.incidents` package. The requester cannot self-approve. Independent approval must resume the original
 remediation invocation, and all seven tool calls must succeed exactly once with the right user, actor and resource.
-The workflow uses explicit sequential orchestration, followed by a tool-free commander summary.
+The commander selects from its rendered agent catalog using the fresh `agentCalls` protocol. The fixture
+requires three completed Temporal child workflows, crashes/restarts the worker during the remediation ASK,
+and then checks a tool-free commander summary and exactly-once business effects. Earlier sequential-only
+evidence remains documented separately in [qualification evidence](docs/QUALIFICATION-EVIDENCE.md).
 
 `qualification.ps1 test -Operations` runs a disposable knowledge-store restore and database-password rotation
 drill. It encrypts quiesced PostgreSQL archives with a process-only AES-GCM drill key, restores empty owned stores,

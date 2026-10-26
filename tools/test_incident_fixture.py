@@ -1,7 +1,8 @@
 """The scripted model must consume real catalogs and remediation results."""
 import unittest
-from pipeline_dependencies import incident_reply
-from qualification_incident import incident_workflow
+import json
+from pipeline_dependencies import incident_reply, incident_delegation_reply
+from qualification_incident import incident_workflow, incident_child_workflows
 
 
 class IncidentFixtureTest(unittest.TestCase):
@@ -26,9 +27,21 @@ class IncidentFixtureTest(unittest.TestCase):
     def test_new_workflow_has_explicit_agent_ceiling_and_no_legacy_tool_nodes(self):
         graph = incident_workflow()
         self.assertNotIn('tools', graph)
-        self.assertEqual(['START', 'AGENT', 'AGENT', 'AGENT', 'AGENT', 'END'], [node['type'] for node in graph['nodes']])
-        self.assertEqual(0, graph['nodes'][-2]['configuration']['maxToolRounds'])
-        self.assertEqual(5, len(graph['edges']))
+        commander = next(node for node in graph['nodes'] if node['id']=='commander')
+        self.assertTrue(commander['configuration']['agentCallPlanner'])
+        self.assertEqual(0, commander['configuration']['maxToolRounds'])
+        self.assertEqual(3, len(graph['childWorkflows']))
+        self.assertEqual(6, len(graph['edges']))
+        for child in incident_child_workflows():
+            self.assertEqual(child['id'], child['nodes'][1]['configuration']['agentName'])
+            self.assertEqual(5, child['nodes'][1]['configuration']['maxToolRounds'])
+            self.assertNotIn('tools', child)
+
+    def test_commander_can_delegate_only_the_rendered_catalog(self):
+        request = {'messages':[{'content':'INCIDENT_DELEGATION_CATALOG:\n[{"agentId":"triage-agent"}]\nDelegate now.'}]}
+        result = json.loads(incident_delegation_reply(request)['content'])
+        self.assertEqual(['triage-agent'], [call['agentId'] for call in result['agentCalls']])
+        self.assertNotIn('toolCalls', result)
 
 
 if __name__ == '__main__':
