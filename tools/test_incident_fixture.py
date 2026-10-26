@@ -32,6 +32,10 @@ class IncidentFixtureTest(unittest.TestCase):
         self.assertEqual(0, commander['configuration']['maxToolRounds'])
         self.assertEqual(3, len(graph['childWorkflows']))
         self.assertEqual(6, len(graph['edges']))
+        for definition in [graph, *incident_child_workflows()]:
+            for node in definition['nodes']:
+                for port in node.get('ports', []):
+                    self.assertTrue(port.get('label'), 'Serialized ports require a label')
         for child in incident_child_workflows():
             self.assertEqual(child['id'], child['nodes'][1]['configuration']['agentName'])
             self.assertEqual(5, child['nodes'][1]['configuration']['maxToolRounds'])

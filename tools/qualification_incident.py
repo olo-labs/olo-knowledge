@@ -29,7 +29,7 @@ def incident_workflow():
         continueNodeId='summary', maxInvalidJsonRetries=3, maxToolRounds=0,
         promptTemplate='INCIDENT_DELEGATION_CATALOG:\n{availableAgentsJson}\n'
                        'Delegate incident triage, remediation and reporting in order. Return agentCalls JSON only. {message}')
-    commander['ports'].append(dict(id='agentPlug', schema='agent-plug', type='agent-plug', direction='INPUT'))
+    commander['ports'].append(dict(id='agentPlug', label='Available agents', schema='agent-plug', type='agent-plug', direction='INPUT'))
     summary = json.loads(json.dumps(template))
     summary['id'] = 'summary'
     summary['execution']['workflowRef']['workflowId'] = 'incident-recovery'
@@ -38,7 +38,7 @@ def incident_workflow():
     plugins = []
     for name in AGENTS:
         plugins.append(dict(id='delegate-'+name, type='AGENT', label=name,
-            ports=[dict(id='agentPlug', schema='agent-plug', type='agent-plug', direction='OUTPUT')],
+            ports=[dict(id='agentPlug', label='Available agents', schema='agent-plug', type='agent-plug', direction='OUTPUT')],
             execution=dict(executionKind='SUBWORKFLOW', executionModel='CHILD_WORKFLOW',
                 workflowRef=dict(workflowId=name, version='1.0.0', inputMapping={}, outputMapping={})),
             configuration=dict(delegateAgentId=name)))
