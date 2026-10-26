@@ -256,3 +256,6 @@ until their reports pass. User-approved follow-ups are performance
 [ToolGate #205](https://github.com/olo-labs/olo-toolgate/issues/205), and production-environment qualification
 [olo-mono #19](https://github.com/olo-labs/olo-mono/issues/19). They do not waive functional fixes, legacy-code
 removal or the final local end-to-end regression, and do not establish production readiness.
+
+See [local qualification evidence](docs/QUALIFICATION-EVIDENCE.md) for the source-pinned incident pass,
+the recovered admission-throttling and cancellation-replay defects, and the remaining acceptance boundary.
