@@ -76,6 +76,21 @@ class Pipeline(Stack):
     def configure_worker(self, config):
         return config
 
+    def start(self):
+        # Validate against the actual target image before creating Control, databases or keys.
+        folder=self.path/'workflow-preflight';folder.mkdir()
+        definitions=self.workflow_definitions()
+        for definition in definitions:
+            (folder/(definition['id']+'.json')).write_text(json.dumps(definition),encoding='utf-8')
+        labels=json.loads(docker('image','inspect','olo-worker:olo-qualification'))[0]['Config'].get('Labels') or {}
+        self.require(labels.get('io.olo.qualification.owner')=='olo-knowledge','Workflow preflight requires an owned worker image')
+        docker('run','--rm','--label','io.olo.qualification.owner=olo-knowledge','--network','none',
+            '--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=64m','-v',str(folder)+':/workflows:ro',
+            '--entrypoint','java','olo-worker:olo-qualification','-cp','/app/lib/*',
+            'org.olo.worker.WorkflowDefinitionCheck','/workflows')
+        print('PASS offline target-worker workflow preflight ('+str(len(definitions))+' definitions)',flush=True)
+        return super().start()
+
     def __init__(self):
         super().__init__('olo-toolgate-quickstart:olo-m8')
         self.artifact(self.report_name,json.dumps(dict(passed=False,stage='STARTING',runId=self.name))+'\n')

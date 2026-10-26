@@ -31,6 +31,9 @@ class IncidentFixtureTest(unittest.TestCase):
         self.assertTrue(commander['configuration']['agentCallPlanner'])
         self.assertEqual(0, commander['configuration']['maxToolRounds'])
         self.assertEqual(3, len(graph['childWorkflows']))
+        self.assertEqual('dynamic', graph['metadata']['agentSelectionStrategy'])
+        self.assertTrue(graph['runtime']['delegation']['enabled'])
+        self.assertEqual(3, graph['runtime']['delegation']['maxDelegations'])
         self.assertEqual(6, len(graph['edges']))
         for definition in [graph, *incident_child_workflows()]:
             for node in definition['nodes']:

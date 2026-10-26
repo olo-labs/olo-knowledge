@@ -230,6 +230,10 @@ requires three completed Temporal child workflows, crashes/restarts the worker d
 and then checks a tool-free commander summary and exactly-once business effects. Earlier sequential-only
 evidence remains documented separately in [qualification evidence](docs/QUALIFICATION-EVIDENCE.md).
 
+Pipeline fixtures first validate every generated workflow offline with the exact worker image's loader.
+This runs without a network before provisioning Control or databases, and requires a worker image containing
+`org.olo.worker.WorkflowDefinitionCheck`. Rebuild the worker from the coordinated completion source before testing.
+
 `qualification.ps1 test -Operations` runs a disposable knowledge-store restore and database-password rotation
 drill. It encrypts quiesced PostgreSQL archives with a process-only AES-GCM drill key, restores empty owned stores,
 checks private ACLs/tombstones, reindexes retained SQL sources and checks old/new database credentials. A forced

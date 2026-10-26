@@ -49,6 +49,9 @@ def incident_workflow():
                                 targetNodeId='commander', targetPortId='agentPlug') for name in AGENTS]
     definition['childWorkflows'] = [dict(workflowId=name, workflowVersion='1.0.0') for name in AGENTS]
     definition['availableAgents'] = [dict(id=name) for name in AGENTS]
+    definition['metadata']['agentSelectionStrategy'] = 'dynamic'
+    definition['runtime']['delegation'] = dict(enabled=True, parallelEnabled=False, maxDepth=3,
+        maxDelegations=3, resultAggregation='MERGE', memoryScope='SHARED')
     definition['metadata']['returnOutputKey'] = 'summary'
     definition['variables'] += [dict(name=name, type=kind, scope='LOCAL', **({'defaultValue':default} if default is not None else {}))
         for name,kind,default in [('agentCallSequenceJson','string',None),('availableAgentsJson','string','[]'),
