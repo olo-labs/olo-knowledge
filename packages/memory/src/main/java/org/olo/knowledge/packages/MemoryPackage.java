@@ -102,7 +102,7 @@ public final class MemoryPackage {
             businessKeyNamespace = KeyNamespace.TENANT,
             effect = EffectSafety.IDEMPOTENT,
             routes = "append",
-            reconciliation = Reconciliation.DOWNSTREAM_IDEMPOTENCY)
+            reconciliation = Reconciliation.MANUAL)
     public Result append(
             @Param(description = "Opaque resource UUID", minLength = 36, maxLength = 36)
                     String conversationId,
@@ -139,7 +139,7 @@ public final class MemoryPackage {
             businessKeyNamespace = KeyNamespace.TENANT,
             effect = EffectSafety.IDEMPOTENT,
             routes = "delete",
-            reconciliation = Reconciliation.DOWNSTREAM_IDEMPOTENCY)
+            reconciliation = Reconciliation.MANUAL)
     public Result delete(
             @Param(description = "Opaque resource UUID", minLength = 36, maxLength = 36)
                     String conversationId,
@@ -175,7 +175,7 @@ public final class MemoryPackage {
             businessKeyNamespace = KeyNamespace.TENANT,
             effect = EffectSafety.IDEMPOTENT,
             routes = "share",
-            reconciliation = Reconciliation.DOWNSTREAM_IDEMPOTENCY)
+            reconciliation = Reconciliation.MANUAL)
     public Result share(
             @Param(description = "Opaque resource UUID", minLength = 36, maxLength = 36)
                     String conversationId,
@@ -211,7 +211,7 @@ public final class MemoryPackage {
             businessKeyNamespace = KeyNamespace.TENANT,
             effect = EffectSafety.IDEMPOTENT,
             routes = "export",
-            reconciliation = Reconciliation.DOWNSTREAM_IDEMPOTENCY)
+            reconciliation = Reconciliation.MANUAL)
     public Result export(
             @Param(description = "Opaque resource UUID", minLength = 36, maxLength = 36)
                     String conversationId,

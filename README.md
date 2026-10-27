@@ -11,6 +11,10 @@ Build/publish the sibling ToolGate SDK with `publishJavaSdkLocally` and its cont
 Then run Gradle 8.12 `:olo-memory:installDist :olo-rag:installDist` here. Build the two Java SDK packages in
 `packages/` with Gradle 9.7.1 `build toolgatePackage`. Each declares the exact permission and root resource;
 the executor broker adds the permit and client certificate. Packages never see database credentials or signing keys.
+For the Windows qualification fixture without a host CLI, run `python tools/build_packages.py --gradle <Gradle-9.7.1-executable>`
+after building the owned ToolGate image. It retains SDK build/check/staging tasks and packs with the matching container CLI.
+Protected service writes declare `MANUAL` reconciliation: their single-use service permits cannot be reissued
+by retrying an unknown operation. Reconcile their storage receipts under a fresh read authorization before settlement.
 
 `python tools/test_services.py --with-vectors --with-tls` owns disposable PostgreSQL 16, Qdrant and Ollama containers,
 downloads/caches the small `all-minilm:latest` evaluation artifact under ignored `build/`, and removes its containers.
@@ -164,6 +168,38 @@ and probes both loopback and internal authorities before any write. These checks
 Temporal/approval/derived-context or concurrent-load matrix. Simultaneous duplicates may receive admission
 conflicts; recovery reuses the original invocation ID and body after its owner settles, then verifies one record.
 
+`test -Pipeline` adds a separate fresh backend/worker/Temporal fixture. Build the owned application
+images from clean source checkouts first:
+
+```powershell
+python tools/build_pipeline_qualification.py --backend-source C:\path\to\olo --worker-source C:\path\to\olo-mono
+.\qualification.ps1 test -Pipeline -Python C:\path\to\python.exe
+# Or build all owned images while creating a new staging session:
+.\qualification.ps1 start -BuildImages -BuildPipelineImages -ToolGateSource C:\path\to\olo-toolgate -BackendSource C:\path\to\olo -WorkerSource C:\path\to\olo-mono
+```
+
+The pipeline creates a new workflow with no local tool registry. Its signed IdP tokens resolve through
+OLO's Redis identity store, and its worker obtains user-bound ToolGate credentials from the backend.
+The IdP and model are scripted qualification dependencies; model quality is not measured here.
+Temporal's pinned development server persists encrypted workflow payloads in an owned volume. This
+fixture uses development gRPC and Gateway HTTP inside its isolated network and cannot sign off M10's
+production transport, at-rest encryption or load requirements. `pipeline.json` records the run's actual
+pass/fail result; a failure is never inherited from a previous passing report. All fixture runtime data,
+including the Temporal volume and generated keys, is disposable.
+
+The October 25 strict pipeline run passed from clean knowledge revision `1627f21`, worker `d73a978`
+and backend image source `f42b439`. A hard worker stop and backend restart/replay retained one Temporal
+execution, one model call and two durable messages. Switching to another unmapped agent did not change
+the user's memory/RAG authority. Source deletion blocked in-flight release in 9.53 s, denied stored
+derived responses, and prevented the next model call using revoked context. Temporal payload inspection
+included base64 decoding; private canary text was absent from backend and worker logs. This is selected
+functional evidence, with explicitly scripted IdP/model dependencies, and does not close complete M8–M10.
+
+`test -LatencyBaseline` measures 16 fresh governed `rag.query` invocations after one warm-up, using one
+user and one document. It records every sample and the real Gateway p50/p95 in `gateway-latency.json`,
+and fails if even this latency floor exceeds 300/800 ms. It is a diagnostic lower-bound check and does
+not replace corpus quality, freshness or concurrent-load qualification.
+
 **Cleanup:** `stop` interrupts recorded fixture processes and removes this workspace's test containers,
 volumes, networks, probe images, the kind cluster, a newly downloaded session-owned node image, and private
 runtime files (generated credentials, keys and kubeconfig). Sanitized reports and source code remain.
@@ -181,3 +217,52 @@ the M10 50-user/50,000-document load gate.
 For restoring a lost vector index from the retained SQL source, governed `rag.update` accepts
 `{type:"reindex",docId:"<uuid>",force:true}`. This publishes a new version even for the same embedding artifact;
 normal scheduled reindex remains a no-op when the artifact is unchanged. A tombstone still refuses rebuilding.
+
+### Incident, operational drills and governed debug
+
+`qualification.ps1 test -Incident -IncidentPackage <official-server-recovery.tgpkg>` provisions three separate
+delegated agent ceilings and an ordinary signed-in user. A scripted test model selects calls from each actual
+catalog; real backend/worker/Temporal/Gateway/Control/Tool Host components execute the official fictional
+`examples.incidents` package. The requester cannot self-approve. Independent approval must resume the original
+remediation invocation, and all seven tool calls must succeed exactly once with the right user, actor and resource.
+The commander selects from its rendered agent catalog using the fresh `agentCalls` protocol. The fixture
+requires three completed Temporal child workflows, crashes/restarts the worker during the remediation ASK,
+and then checks a tool-free commander summary and exactly-once business effects. Earlier sequential-only
+evidence remains documented separately in [qualification evidence](docs/QUALIFICATION-EVIDENCE.md).
+
+Pipeline fixtures first validate every generated workflow offline with the exact worker image's loader.
+This runs without a network before provisioning Control or databases, and requires a worker image containing
+`org.olo.worker.WorkflowDefinitionCheck`. Rebuild the worker from the coordinated completion source before testing.
+
+`qualification.ps1 test -Operations` runs a disposable knowledge-store restore and database-password rotation
+drill. It encrypts quiesced PostgreSQL archives with a process-only AES-GCM drill key, restores empty owned stores,
+checks private ACLs/tombstones, reindexes retained SQL sources and checks old/new database credentials. A forced
+post-permit SQL failure must remain `OUTCOME_UNKNOWN`; repairing SQL and replaying the exact operation cannot
+redispatch it. This does not establish coordinated ToolGate/Temporal restore or qualify every credential rotation.
+Generated evidence is `incident.json`, `incident-invocations.json` and `operations.json` under `build/qualification/`.
+
+For an interactive owned debug stack, after building the qualification application images:
+
+```powershell
+.\governed-debug.ps1 up -Python C:\path\to\python.exe
+.\governed-debug.ps1 check
+.\governed-debug.ps1 down
+```
+
+The adjacent mono checkout exposes the same stack through `debug/debug.ps1 up -ToolGate
+-QualificationPython C:\path\to\python.exe`, with `check`, `status`, `logs`, `collect` and `down` actions.
+This selects a separate fresh governed fixture, including backend, worker, Temporal, provisioned ToolGate and
+memory/RAG services; it uses development transport and a scripted IdP/model. It requires no legacy debug compose
+stack. The hidden fixture process remains alive for inspection until `down`, which removes all owned runtime
+resources through `qualification.ps1 stop`. Shared caches and sanitized reports remain.
+
+See [the operations runbook](docs/OPERATIONS.md) for least-privilege grants, reconciliation, backup/restore,
+credential/key rollover and retention requirements. These procedures and test commands do not count as acceptance
+until their reports pass. User-approved follow-ups are performance
+[ToolGate #204](https://github.com/olo-labs/olo-toolgate/issues/204), local PHP contract validation
+[ToolGate #205](https://github.com/olo-labs/olo-toolgate/issues/205), and production-environment qualification
+[olo-mono #19](https://github.com/olo-labs/olo-mono/issues/19). They do not waive functional fixes, legacy-code
+removal or the final local end-to-end regression, and do not establish production readiness.
+
+See [local qualification evidence](docs/QUALIFICATION-EVIDENCE.md) for the source-pinned incident pass,
+the recovered admission-throttling and cancellation-replay defects, and the remaining acceptance boundary.

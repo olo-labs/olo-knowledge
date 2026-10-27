@@ -12,7 +12,15 @@ param(
     [Parameter(Position=0)][ValidateSet('start','test','status','stop')][string]$Action='start',
     [string]$Python='python',
     [switch]$FullStack,
+    [switch]$Pipeline,
+    [switch]$Incident,
+    [switch]$Operations,
+    [string]$IncidentPackage,
+    [switch]$LatencyBaseline,
     [switch]$BuildImages,
+    [switch]$BuildPipelineImages,
+    [string]$BackendSource=(Join-Path $PSScriptRoot '../olo'),
+    [string]$WorkerSource=(Join-Path $PSScriptRoot '../olo-mono'),
     [string]$ToolGateSource=(Join-Path $PSScriptRoot '../olo-toolgate'),
     [string]$ImageArchive,
     [switch]$Evaluation
@@ -61,7 +69,7 @@ function Stop-FixtureProcess {
         if($record.workspace -ne $Root -or $record.session -notmatch '^olo-qualification-[0-9a-f]{12}$'){throw 'Fixture process ownership mismatch'}
         $process=Get-CimInstance Win32_Process -Filter "ProcessId = $($record.pid)"
         if($process) {
-            if($process.Name -notmatch '^python(3)?(.exe)?$' -or ($record.script -notin @('qualification_stack.py','test_services.py') -or $process.CommandLine -notlike "*$($record.script)*")){throw 'Refusing to terminate an unrelated process'}
+            if($process.Name -notmatch '^python(3)?(.exe)?$' -or ($record.script -notin @('qualification_stack.py','qualification_pipeline.py','qualification_incident.py','qualification_operations.py','qualification_debug.py','qualification_latency.py','test_services.py') -or $process.CommandLine -notlike "*$($record.script)*")){throw 'Refusing to terminate an unrelated process'}
             Stop-Process -Id $record.pid -Force
             Wait-Process -Id $record.pid -ErrorAction SilentlyContinue
         }
@@ -133,6 +141,13 @@ if($Action -eq 'test') {
     Invoke-Checked $Python @((Join-Path $Root 'tools/qualify_network.py'),'--kubeconfig',$Kubeconfig)
     if($Evaluation){Invoke-Checked $Python @((Join-Path $Root 'tools/test_services.py'),'--evaluation','--with-tls')}
     if($FullStack){Invoke-Checked $Python @((Join-Path $Root 'tools/qualification_stack.py'))}
+    if($Pipeline){Invoke-Checked $Python @((Join-Path $Root 'tools/qualification_pipeline.py'))}
+    if($Operations){Invoke-Checked $Python @((Join-Path $Root 'tools/qualification_operations.py'))}
+    if($Incident){
+        if(!$IncidentPackage){throw 'Incident qualification requires -IncidentPackage with the official built server-recovery .tgpkg'}
+        Invoke-Checked $Python @((Join-Path $Root 'tools/qualification_incident.py'),'--package',$IncidentPackage)
+    }
+    if($LatencyBaseline){Invoke-Checked $Python @((Join-Path $Root 'tools/qualification_latency.py'))}
     exit 0
 }
 if(Test-Path -LiteralPath $StateFile){throw 'A session already exists. Use status/test, or stop before a fresh installation.'}
@@ -163,6 +178,7 @@ nodes:
 '@ | Set-Content -LiteralPath $config -Encoding utf8
 try {
     if($BuildImages){Invoke-Checked $Python @((Join-Path $Root 'tools/build_qualification.py'),'--source',$ToolGateSource)}
+    if($BuildPipelineImages){Invoke-Checked $Python @((Join-Path $Root 'tools/build_pipeline_qualification.py'),'--backend-source',$BackendSource,'--worker-source',$WorkerSource)}
     if($ImageArchive){Invoke-Checked $Python @((Join-Path $Root 'tools/import_qualification.py'),$ImageArchive)}
     # Ready requires the CNI, installed immediately after the API server is available.
     & $Kind create cluster --name $Cluster --image $NodeImage --config $config --kubeconfig $Kubeconfig
